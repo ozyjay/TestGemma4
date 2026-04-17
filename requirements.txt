@@ -1,0 +1,10 @@
+--index-url https://download.pytorch.org/whl/cu128
+torch
+torchvision
+torchaudio
+transformers
+accelerate
+sentencepiece
+sv_ttk
+nvidia-ml-py
+markdown-it-py
