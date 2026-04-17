@@ -102,6 +102,40 @@ Replace an existing installed copy:
 The executable does not bundle the Gemma model weights. On first launch it uses
 the same Hugging Face cache/download flow as the Python app.
 
+### Why the build is large
+
+The PyInstaller build is expected to be large. Even without bundling Gemma model
+weights, the app has to include a Python runtime plus ML dependencies such as
+PyTorch, Transformers, Accelerate, Tokenizers, SentencePiece, and CUDA/PyTorch
+support libraries.
+
+Most of the size is in:
+
+```text
+dist\Gemma4Chat\_internal\
+```
+
+This project intentionally uses PyInstaller's one-folder layout:
+
+```text
+dist\Gemma4Chat\Gemma4Chat.exe
+dist\Gemma4Chat\_internal\
+```
+
+Avoid `--onefile` for this app unless there is a specific reason. It would still
+be large, and startup is usually slower because the bundled files have to be
+unpacked before launch.
+
+For daily use on your own machine, running from the virtual environment can be
+lighter and easier to update:
+
+```powershell
+.\.venv\Scripts\python.exe app.py
+```
+
+Use the PyInstaller build when you want a self-contained app folder that can be
+installed under `E:\Programs`.
+
 ## Diagnostics
 
 Use the `Diagnostics` toolbar button to show or hide captured stdout/stderr output.
