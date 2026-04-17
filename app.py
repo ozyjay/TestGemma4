@@ -390,6 +390,7 @@ class GemmaChat:
         self._load_start: float = 0
         self._stream_response_text = ""
         self._stream_thinking_text = ""
+        self._stream_response_pending_newline = False
         self._response_render_job: str | None = None
         self._thinking_render_job: str | None = None
         self._has_thinking_history = False
@@ -400,6 +401,7 @@ class GemmaChat:
         self.diagnostics_log_path: Path | None = None
         self._diagnostics_log_handle = None
         self._diagnostics_visible = False
+        self._loading_screen_visible = False
         self._diagnostics_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self._diagnostics_flush_job: str | None = None
         self._stdout_original = sys.stdout
@@ -635,8 +637,58 @@ class GemmaChat:
         self.diagnostics_display.pack(fill=tk.BOTH, expand=True)
         self._make_readonly_display(self.diagnostics_display)
 
+        # Startup loading panel (shown until model loading completes)
+        self.loading_frame = ttk.Frame(chat_frame, padding=32)
+        self.loading_frame.columnconfigure(0, weight=1)
+        self.loading_frame.rowconfigure(0, weight=1)
+
+        loading_content = ttk.Frame(self.loading_frame, padding=24)
+        loading_content.grid(row=0, column=0)
+
+        ttk.Label(
+            loading_content,
+            text="Gemma 4 E2B-it Chat",
+            font=(self.font_family.get(), 20, "bold"),
+            anchor=tk.CENTER,
+        ).pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Label(
+            loading_content,
+            text="Preparing the local model",
+            font=(self.font_family.get(), 12),
+            anchor=tk.CENTER,
+        ).pack(fill=tk.X, pady=(0, 18))
+
+        self.loading_status_label = ttk.Label(
+            loading_content,
+            textvariable=self.status_var,
+            anchor=tk.CENTER,
+            wraplength=520,
+        )
+        self.loading_status_label.pack(fill=tk.X, pady=(0, 10))
+
+        self.loading_progress = ttk.Progressbar(
+            loading_content,
+            variable=self.progress_var,
+            maximum=100,
+            length=520,
+        )
+        self.loading_progress.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Label(
+            loading_content,
+            text=(
+                "First launch may take a while if the model needs to download. "
+                "Later launches still need to load weights into GPU memory."
+            ),
+            anchor=tk.CENTER,
+            justify=tk.CENTER,
+            wraplength=520,
+        ).pack(fill=tk.X)
+
         # Initially only show the chat panel
-        self.chat_pane.add(self.main_chat_frame, weight=3)
+        self.chat_pane.add(self.loading_frame, weight=3)
+        self._loading_screen_visible = True
         self._thinking_visible = False
 
     def _make_readonly_display(self, widget: tk.Text):
@@ -791,6 +843,17 @@ class GemmaChat:
         self._diagnostics_visible = True
         self.diagnostics_btn.configure(text="Hide Diagnostics")
         self.diagnostics_display.see(tk.END)
+
+    def _hide_loading_screen(self):
+        if not self._loading_screen_visible:
+            return
+
+        try:
+            self.chat_pane.remove(self.loading_frame)
+        except tk.TclError:
+            pass
+        self.chat_pane.add(self.main_chat_frame, weight=3)
+        self._loading_screen_visible = False
 
     def _begin_thinking_block(self):
         self._show_thinking_panel()
@@ -1130,8 +1193,19 @@ class GemmaChat:
                 setattr(self, attr, None)
 
     def _should_autoscroll(self, widget: tk.Text) -> bool:
+        if self._has_active_selection(widget):
+            return False
+
         _, bottom = widget.yview()
         return bottom >= 0.995
+
+    def _has_active_selection(self, widget: tk.Text) -> bool:
+        try:
+            widget.index(tk.SEL_FIRST)
+            widget.index(tk.SEL_LAST)
+            return True
+        except tk.TclError:
+            return False
 
     def _append_to_widget(self, widget: tk.Text, text: str, tag: str | None = None):
         should_scroll = self._should_autoscroll(widget)
@@ -1167,9 +1241,16 @@ class GemmaChat:
         self.chat_display.configure(state=tk.NORMAL)
         if should_scroll:
             self.chat_display.see(tk.END)
+        if self._stream_response_pending_newline:
+            self._stream_response_pending_newline = False
+            self._append_chat("\n\n")
 
     def _render_streamed_response_markdown(self):
         self._response_render_job = None
+        if self._has_active_selection(self.chat_display):
+            self._schedule_streamed_response_markdown()
+            return
+
         should_scroll = self._should_autoscroll(self.chat_display)
         self.chat_display.configure(state=tk.NORMAL)
         try:
@@ -1188,6 +1269,10 @@ class GemmaChat:
 
     def _render_streamed_thinking_markdown(self):
         self._thinking_render_job = None
+        if self._has_active_selection(self.thinking_display):
+            self._schedule_streamed_thinking_markdown()
+            return
+
         should_scroll = self._should_autoscroll(self.thinking_display)
         self.thinking_display.configure(state=tk.NORMAL)
         try:
@@ -1205,6 +1290,10 @@ class GemmaChat:
         self._thinking_render_job = self.root.after(120, self._render_streamed_thinking_markdown)
 
     def _replace_streamed_thinking_with_markdown(self, thinking_text: str):
+        if self._has_active_selection(self.thinking_display):
+            self._schedule_streamed_thinking_markdown()
+            return
+
         should_scroll = self._should_autoscroll(self.thinking_display)
         self.thinking_display.configure(state=tk.NORMAL)
         try:
@@ -1423,7 +1512,9 @@ class GemmaChat:
                 # Phase 2: load into GPU
                 self.root.after(0, lambda: self.status_var.set("Loading weights into GPU..."))
                 self.root.after(0, lambda: self.progress_bar.configure(mode="indeterminate"))
+                self.root.after(0, lambda: self.loading_progress.configure(mode="indeterminate"))
                 self.root.after(0, lambda: self.progress_bar.start(15))
+                self.root.after(0, lambda: self.loading_progress.start(15))
 
                 self.processor = AutoProcessor.from_pretrained(local_path)
                 self.model = AutoModelForCausalLM.from_pretrained(
@@ -1434,9 +1525,12 @@ class GemmaChat:
 
                 def _done():
                     self.progress_bar.stop()
+                    self.loading_progress.stop()
                     self.progress_bar.configure(mode="determinate")
+                    self.loading_progress.configure(mode="determinate")
                     self.progress_var.set(100)
                     self._stop_elapsed_timer()
+                    self._hide_loading_screen()
                     if self._pending_send:
                         self._pending_send = False
                         self.status_var.set("Model loaded. Sending queued message...")
@@ -1459,8 +1553,11 @@ class GemmaChat:
                 def _show_load_error(err=e):
                     self._stop_elapsed_timer()
                     self.progress_bar.stop()
+                    self.loading_progress.stop()
                     self.progress_bar.configure(mode="determinate")
+                    self.loading_progress.configure(mode="determinate")
                     self.status_var.set(f"Model load failed: {err}")
+                    self._hide_loading_screen()
                     self._append_chat(f"[Error] Failed to load model: {err}\n\n", "system_msg")
                     self._append_log_entry("Error", f"Failed to load model: {err}")
 
@@ -1554,6 +1651,7 @@ class GemmaChat:
         self._cancel_stream_render_jobs()
         self._stream_response_text = ""
         self._stream_thinking_text = ""
+        self._stream_response_pending_newline = False
         if self.think_var.get():
             self._begin_thinking_block()
         # Place a mark right after "Gemma: " so we know exactly where
@@ -1771,15 +1869,29 @@ class GemmaChat:
     def _stream_chunk(self, chunk: str):
         """Append a response token and refresh markdown after a short pause."""
         self._stream_response_text += chunk
+        if self._has_active_selection(self.chat_display):
+            self._append_to_widget(self.chat_display, chunk)
+            return
+
         self._schedule_streamed_response_markdown()
 
     def _stream_thinking_chunk(self, chunk: str):
         """Append a thinking token and refresh markdown after a short pause."""
         self._stream_thinking_text += chunk
+        if self._has_active_selection(self.thinking_display):
+            self._append_to_widget(self.thinking_display, chunk)
+            return
+
         self._schedule_streamed_thinking_markdown()
 
     def _replace_streamed_with_markdown(self, response_text):
         """Delete the raw streamed text and re-render with markdown formatting."""
+        if self._has_active_selection(self.chat_display):
+            self._stream_response_text = response_text
+            self._schedule_streamed_response_markdown()
+            self._stream_response_pending_newline = True
+            return
+
         self.chat_display.configure(state=tk.NORMAL)
         try:
             self.chat_display.delete("stream_start", tk.END)
@@ -1789,6 +1901,7 @@ class GemmaChat:
 
         self._append_markdown(response_text)
         self._append_chat("\n\n")
+        self._stream_response_pending_newline = False
 
     def _on_clear(self):
         self._cancel_stream_render_jobs()

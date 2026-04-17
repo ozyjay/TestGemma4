@@ -23,6 +23,73 @@ pip install -r requirements.txt
 huggingface-cli login
 ```
 
+## Clean clone setup
+
+On a new Windows machine:
+
+```powershell
+git clone <your-repo-url>
+cd TestGemma4
+
+py -3.12 -m venv .venv
+.\.venv\Scripts\activate
+
+pip install -r requirements.txt
+huggingface-cli login
+```
+
+The Hugging Face account must have accepted the Gemma model license before the
+first model download.
+
+Run from source:
+
+```powershell
+python app.py
+```
+
+On first launch, the app asks where to create `.test.gemma4`. That folder stores
+the saved Assistant Behaviour (`system_prompt.md`), chat logs, and diagnostics
+logs. The model weights are not stored in this repo; Hugging Face downloads and
+caches them on the machine.
+
+If Git reports dubious ownership after cloning or moving the folder, trust the
+clone path for the current Windows user:
+
+```powershell
+git config --global --add safe.directory <full-path-to-clone>
+```
+
+Example:
+
+```powershell
+git config --global --add safe.directory C:/Users/You/source/TestGemma4
+```
+
+Build and install the desktop app:
+
+```powershell
+.\scripts\Build.ps1 -Clean
+.\scripts\Install-ToPrograms.ps1 -Replace
+```
+
+Default install path:
+
+```text
+%LOCALAPPDATA%\Programs\Gemma4Chat
+```
+
+Run the installed app:
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\Gemma4Chat\Gemma4Chat.exe"
+```
+
+Custom install location:
+
+```powershell
+.\scripts\Install-ToPrograms.ps1 -InstallRoot "D:\Programs" -Replace
+```
+
 ## Usage
 
 ### Interactive chat
@@ -87,16 +154,44 @@ Useful build options:
 .\scripts\Build.ps1 -SkipInstall  # reuse already installed build deps
 ```
 
-Install the built app to `E:\Programs\Gemma4Chat`:
+Install the built app under the current user's local programs folder:
 
 ```powershell
 .\scripts\Install-ToPrograms.ps1
+```
+
+By default this installs to:
+
+```text
+%LOCALAPPDATA%\Programs\Gemma4Chat
+```
+
+Earlier versions of this script hardcoded `E:\Programs` as the default install
+root. The script is now computer-agnostic, so `E:\Programs` is only used when you
+ask for it explicitly.
+
+Choose a custom install location when needed:
+
+```powershell
+.\scripts\Install-ToPrograms.ps1 -InstallRoot "E:\Programs"
+```
+
+That installs to:
+
+```text
+E:\Programs\Gemma4Chat
 ```
 
 Replace an existing installed copy:
 
 ```powershell
 .\scripts\Install-ToPrograms.ps1 -Replace
+```
+
+Replace an existing copy in a custom location:
+
+```powershell
+.\scripts\Install-ToPrograms.ps1 -InstallRoot "E:\Programs" -Replace
 ```
 
 The executable does not bundle the Gemma model weights. On first launch it uses
@@ -134,7 +229,7 @@ lighter and easier to update:
 ```
 
 Use the PyInstaller build when you want a self-contained app folder that can be
-installed under `E:\Programs`.
+installed under your local programs folder or another explicit `-InstallRoot`.
 
 ## Diagnostics
 

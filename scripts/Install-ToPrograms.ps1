@@ -1,5 +1,5 @@
 param(
-    [string]$InstallRoot = "E:\Programs",
+    [string]$InstallRoot,
     [string]$AppName = "Gemma4Chat",
     [switch]$Replace
 )
@@ -7,6 +7,11 @@ param(
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+$defaultInstallRoot = Join-Path $env:LOCALAPPDATA "Programs"
+if (-not $InstallRoot) {
+    $InstallRoot = $defaultInstallRoot
+}
+
 $sourceDir = Join-Path $repoRoot "dist\$AppName"
 $sourceExe = Join-Path $sourceDir "$AppName.exe"
 $targetDir = Join-Path $InstallRoot $AppName
