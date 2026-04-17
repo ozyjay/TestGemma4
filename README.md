@@ -35,13 +35,13 @@ python chat.py --think    # enable thinking / reasoning mode
 Commands inside the chat session:
 - `/think` — toggle thinking mode on/off
 - `/reset` — clear conversation history
-- `/behaviour <instruction>` — append an instruction to Assistant Behaviour
+- `/behaviour <instruction>` — rewrite Assistant Behaviour from advice
 - `/behavior <instruction>` — same as `/behaviour`
 - `quit` — exit
 
 In the desktop app, type a behaviour change in the input box and click
-`Update Behaviour` to append it to the saved Assistant Behaviour instructions
-without sending it as a normal chat message.
+`Update Behaviour` to ask Gemma to rewrite the saved Assistant Behaviour
+instructions without sending the advice as a normal chat message.
 
 ### Single-shot generation
 
