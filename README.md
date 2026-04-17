@@ -52,6 +52,16 @@ the saved Assistant Behaviour (`system_prompt.md`), chat logs, and diagnostics
 logs. The model weights are not stored in this repo; Hugging Face downloads and
 caches them on the machine.
 
+The desktop app also saves the current conversation in:
+
+```text
+.test.gemma4\conversation.json
+```
+
+When you reopen the app, the previous conversation is restored. Use
+`Clear Conversation` to start fresh. This resets `conversation.json` to an empty
+conversation but does not delete transcript or diagnostics log files.
+
 If Git reports dubious ownership after cloning or moving the folder, trust the
 clone path for the current Windows user:
 
@@ -109,6 +119,8 @@ Commands inside the chat session:
 In the desktop app, type a behaviour change in the input box and click
 `Update Behaviour` to ask Gemma to rewrite the saved Assistant Behaviour
 instructions without sending the advice as a normal chat message.
+The rewrite uses thinking mode internally; any thinking output appears in the
+Thinking pane.
 
 ### Single-shot generation
 

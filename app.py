@@ -82,6 +82,7 @@ except Exception:
 MODEL_ID = "google/gemma-4-E2B-it"
 APP_FOLDER_NAME = ".test.gemma4"
 SYSTEM_PROMPT_FILE_NAME = "system_prompt.md"
+CONVERSATION_FILE_NAME = "conversation.json"
 SETTINGS_DIR = Path.home() / "AppData" / "Roaming" / "TestGemma4"
 SETTINGS_FILE = SETTINGS_DIR / "settings.json"
 
@@ -391,6 +392,7 @@ class GemmaChat:
         self._stream_response_text = ""
         self._stream_thinking_text = ""
         self._stream_response_pending_newline = False
+        self._selection_freeze_widgets: set[str] = set()
         self._response_render_job: str | None = None
         self._thinking_render_job: str | None = None
         self._has_thinking_history = False
@@ -420,8 +422,8 @@ class GemmaChat:
         self._build_ui()
         self._apply_theme()
         self._apply_fonts()
-        self._reset_conversation()
         self._setup_logging()
+        self._load_saved_conversation()
         self._setup_diagnostics_capture()
         self.system_prompt.bind("<<Modified>>", self._on_system_prompt_modified)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -599,7 +601,7 @@ class GemmaChat:
         )
         self.behaviour_btn.pack(fill=tk.X, pady=(0, 3))
 
-        self.clear_btn = ttk.Button(btn_frame, text="Clear", command=self._on_clear)
+        self.clear_btn = ttk.Button(btn_frame, text="Clear Conversation", command=self._on_clear)
         self.clear_btn.pack(fill=tk.X)
 
         # --- Chat display — fills remaining space ---
@@ -698,6 +700,9 @@ class GemmaChat:
         widget.bind("<<Cut>>", lambda _event: "break")
         widget.bind("<Control-a>", lambda _event, w=widget: self._select_all_text(w))
         widget.bind("<Control-A>", lambda _event, w=widget: self._select_all_text(w))
+        widget.bind("<ButtonPress-1>", lambda _event, w=widget: self._freeze_selection_updates(w), add="+")
+        widget.bind("<B1-Motion>", lambda _event, w=widget: self._freeze_selection_updates(w), add="+")
+        widget.bind("<ButtonRelease-1>", lambda _event, w=widget: self._release_selection_updates(w), add="+")
 
     def _block_readonly_edit(self, event):
         allowed_keys = {
@@ -713,6 +718,7 @@ class GemmaChat:
         return "break"
 
     def _select_all_text(self, widget: tk.Text):
+        self._freeze_selection_updates(widget)
         widget.tag_add(tk.SEL, "1.0", tk.END)
         widget.mark_set(tk.INSERT, "1.0")
         widget.see(tk.INSERT)
@@ -968,6 +974,70 @@ class GemmaChat:
 
         return self.log_dir / SYSTEM_PROMPT_FILE_NAME
 
+    def _conversation_path(self) -> Path | None:
+        if not self.log_dir:
+            return None
+
+        return self.log_dir / CONVERSATION_FILE_NAME
+
+    def _load_saved_conversation(self):
+        path = self._conversation_path()
+        if not path or not path.exists():
+            self.messages = []
+            return
+
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            self.messages = []
+            return
+
+        if not isinstance(loaded, list):
+            self.messages = []
+            return
+
+        messages: list[dict] = []
+        for item in loaded:
+            if not isinstance(item, dict):
+                continue
+            role = item.get("role")
+            content = item.get("content")
+            if role in {"user", "assistant"} and isinstance(content, str):
+                messages.append({"role": role, "content": content})
+
+        self.messages = messages
+        self._render_saved_conversation()
+
+    def _save_conversation(self):
+        path = self._conversation_path()
+        if not path:
+            return
+
+        try:
+            path.write_text(
+                json.dumps(self.messages, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            self.status_var.set(f"Conversation save failed: {exc}")
+
+    def _render_saved_conversation(self):
+        if not self.messages:
+            return
+
+        self._append_chat("System: ", "system_msg")
+        self._append_chat("Restored previous conversation.\n\n", "system_msg")
+        for message in self.messages:
+            role = message["role"]
+            content = message["content"]
+            if role == "user":
+                self._append_chat("You: ", "user")
+                self._append_chat(f"{content}\n\n")
+            elif role == "assistant":
+                self._append_chat("Gemma: ", "assistant")
+                self._append_markdown(content)
+                self._append_chat("\n\n")
+
     def _resolve_log_dir(self) -> Path | None:
         configured = self._read_configured_log_dir()
         if configured:
@@ -1193,11 +1263,26 @@ class GemmaChat:
                 setattr(self, attr, None)
 
     def _should_autoscroll(self, widget: tk.Text) -> bool:
-        if self._has_active_selection(widget):
+        if self._selection_updates_paused(widget):
             return False
 
         _, bottom = widget.yview()
         return bottom >= 0.995
+
+    def _freeze_selection_updates(self, widget: tk.Text):
+        self._selection_freeze_widgets.add(str(widget))
+
+    def _release_selection_updates(self, widget: tk.Text):
+        self.root.after(350, lambda w=widget: self._clear_selection_freeze(w))
+
+    def _clear_selection_freeze(self, widget: tk.Text):
+        if self._has_active_selection(widget):
+            return
+
+        self._selection_freeze_widgets.discard(str(widget))
+
+    def _selection_updates_paused(self, widget: tk.Text) -> bool:
+        return str(widget) in self._selection_freeze_widgets or self._has_active_selection(widget)
 
     def _has_active_selection(self, widget: tk.Text) -> bool:
         try:
@@ -1247,7 +1332,7 @@ class GemmaChat:
 
     def _render_streamed_response_markdown(self):
         self._response_render_job = None
-        if self._has_active_selection(self.chat_display):
+        if self._selection_updates_paused(self.chat_display):
             self._schedule_streamed_response_markdown()
             return
 
@@ -1269,7 +1354,7 @@ class GemmaChat:
 
     def _render_streamed_thinking_markdown(self):
         self._thinking_render_job = None
-        if self._has_active_selection(self.thinking_display):
+        if self._selection_updates_paused(self.thinking_display):
             self._schedule_streamed_thinking_markdown()
             return
 
@@ -1290,7 +1375,7 @@ class GemmaChat:
         self._thinking_render_job = self.root.after(120, self._render_streamed_thinking_markdown)
 
     def _replace_streamed_thinking_with_markdown(self, thinking_text: str):
-        if self._has_active_selection(self.thinking_display):
+        if self._selection_updates_paused(self.thinking_display):
             self._schedule_streamed_thinking_markdown()
             return
 
@@ -1345,6 +1430,8 @@ class GemmaChat:
         self._append_chat("System: ", "system_msg")
         self._append_chat(f"Rewriting assistant behaviour from advice: {advice}\n\n", "system_msg")
         self._append_log_entry("Behaviour Rewrite Advice", advice)
+        self._stream_thinking_text = ""
+        self._begin_thinking_block()
         current_behaviour = self._get_system_prompt()
         threading.Thread(
             target=self._rewrite_behaviour,
@@ -1400,12 +1487,17 @@ class GemmaChat:
                 new_tokens[0],
                 skip_special_tokens=False,
             )
-            _thinking_text, response_text = _split_gemma_channels(raw_text)
+            thinking_text, response_text = _split_gemma_channels(raw_text)
+            if thinking_text:
+                thinking_text = thinking_text.replace("\\n", "\n")
             rewritten = self._clean_behaviour_rewrite(response_text or raw_text)
             if not rewritten:
                 raise ValueError("The behaviour rewrite was empty.")
 
-            self.root.after(0, lambda: self._finish_behaviour_rewrite(advice, rewritten))
+            self.root.after(
+                0,
+                lambda: self._finish_behaviour_rewrite(advice, rewritten, thinking_text),
+            )
         except Exception as exc:
             traceback.print_exc(file=sys.stderr)
             self.root.after(0, lambda err=exc: self._fail_behaviour_rewrite(err))
@@ -1421,7 +1513,13 @@ class GemmaChat:
 
         return cleaned
 
-    def _finish_behaviour_rewrite(self, advice: str, rewritten: str):
+    def _finish_behaviour_rewrite(self, advice: str, rewritten: str, thinking_text: str | None):
+        if thinking_text:
+            self._stream_thinking_text = thinking_text
+            self._replace_streamed_thinking_with_markdown(thinking_text)
+            self._append_log_entry("Thinking", thinking_text)
+        else:
+            self._discard_active_thinking_block()
         self._set_system_prompt(rewritten)
         self._append_chat("System: ", "system_msg")
         self._append_chat(
@@ -1435,6 +1533,7 @@ class GemmaChat:
         self.send_btn.configure(state=tk.NORMAL)
 
     def _fail_behaviour_rewrite(self, error: Exception):
+        self._discard_active_thinking_block()
         self._append_chat("System: ", "system_msg")
         self._append_chat(f"Behaviour rewrite failed: {error}\n\n", "system_msg")
         self._append_log_entry("Behaviour Rewrite Error", str(error))
@@ -1629,6 +1728,7 @@ class GemmaChat:
         self._append_chat(f"{user_text}\n\n")
 
         self.messages.append({"role": "user", "content": user_text})
+        self._save_conversation()
         self._append_log_entry("User", user_text)
 
         if self.model is None:
@@ -1826,9 +1926,11 @@ class GemmaChat:
                     # Save partial response with a marker
                     logged_response = response_text + " [interrupted]"
                     self.messages.append({"role": "assistant", "content": logged_response})
+                    self._save_conversation()
                     self._append_log_entry("Assistant", logged_response)
                 elif response_text:
                     self.messages.append({"role": "assistant", "content": response_text})
+                    self._save_conversation()
                     self._append_log_entry("Assistant", response_text)
 
                 self._stop_elapsed_timer()
@@ -1842,6 +1944,7 @@ class GemmaChat:
                     self._append_chat("You: ", "user")
                     self._append_chat(f"{steer_text}\n\n")
                     self.messages.append({"role": "user", "content": steer_text})
+                    self._save_conversation()
                     self._append_log_entry("User", steer_text)
                     self._start_generate()
                 elif was_stopped:
@@ -1869,7 +1972,7 @@ class GemmaChat:
     def _stream_chunk(self, chunk: str):
         """Append a response token and refresh markdown after a short pause."""
         self._stream_response_text += chunk
-        if self._has_active_selection(self.chat_display):
+        if self._selection_updates_paused(self.chat_display):
             self._append_to_widget(self.chat_display, chunk)
             return
 
@@ -1878,7 +1981,7 @@ class GemmaChat:
     def _stream_thinking_chunk(self, chunk: str):
         """Append a thinking token and refresh markdown after a short pause."""
         self._stream_thinking_text += chunk
-        if self._has_active_selection(self.thinking_display):
+        if self._selection_updates_paused(self.thinking_display):
             self._append_to_widget(self.thinking_display, chunk)
             return
 
@@ -1886,7 +1989,7 @@ class GemmaChat:
 
     def _replace_streamed_with_markdown(self, response_text):
         """Delete the raw streamed text and re-render with markdown formatting."""
-        if self._has_active_selection(self.chat_display):
+        if self._selection_updates_paused(self.chat_display):
             self._stream_response_text = response_text
             self._schedule_streamed_response_markdown()
             self._stream_response_pending_newline = True
@@ -1907,6 +2010,7 @@ class GemmaChat:
         self._cancel_stream_render_jobs()
         self._append_log_entry("System", "Conversation cleared.")
         self._reset_conversation()
+        self._save_conversation()
         self.chat_display.configure(state=tk.NORMAL)
         self.chat_display.delete("1.0", tk.END)
         self.chat_display.configure(state=tk.NORMAL)
