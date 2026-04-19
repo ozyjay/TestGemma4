@@ -65,9 +65,12 @@ class GemmaChat(
         self.log_dir: Path | None = None
         self.log_path: Path | None = None
         self._system_prompt_save_job: str | None = None
+        self._system_prompt_history: list[dict] = []
+        self._system_prompt_history_labels: list[str] = []
         self._system_prompt_min_lines = 2
         self._system_prompt_max_lines = 8
         self.system_prompt_lines = tk.IntVar(value=self._system_prompt_min_lines)
+        self.system_prompt_history_var = tk.StringVar(value="Prompt history")
         self.diagnostics_log_path: Path | None = None
         self._diagnostics_log_handle = None
         self._diagnostics_visible = False
@@ -236,13 +239,38 @@ class GemmaChat(
             text="Assistant Behaviour",
             style="Section.TLabel",
         ).pack(side=tk.LEFT)
+
+        behaviour_tools = ttk.Frame(behaviour_header, style="Panel.TFrame")
+        behaviour_tools.pack(side=tk.RIGHT)
+
+        self.system_prompt_history_combo = ttk.Combobox(
+            behaviour_tools,
+            textvariable=self.system_prompt_history_var,
+            values=[],
+            width=32,
+            state=tk.DISABLED,
+        )
+        self.system_prompt_history_combo.pack(side=tk.LEFT, padx=(0, 6))
+        self.system_prompt_history_combo.bind(
+            "<Return>",
+            lambda _event: self._restore_selected_system_prompt(),
+        )
+
+        self.restore_system_prompt_btn = ttk.Button(
+            behaviour_tools,
+            text="Restore",
+            command=self._restore_selected_system_prompt,
+            state=tk.DISABLED,
+        )
+        self.restore_system_prompt_btn.pack(side=tk.LEFT, padx=(0, 10))
+
         ttk.Label(
-            behaviour_header,
+            behaviour_tools,
             text="Lines",
             style="Toolbar.TLabel",
-        ).pack(side=tk.RIGHT, padx=(8, 0))
+        ).pack(side=tk.LEFT, padx=(0, 6))
         behaviour_lines_spin = ttk.Spinbox(
-            behaviour_header,
+            behaviour_tools,
             from_=self._system_prompt_min_lines,
             to=self._system_prompt_max_lines,
             increment=1,
@@ -250,7 +278,7 @@ class GemmaChat(
             width=3,
             command=self._apply_system_prompt_height,
         )
-        behaviour_lines_spin.pack(side=tk.RIGHT)
+        behaviour_lines_spin.pack(side=tk.LEFT)
         behaviour_lines_spin.bind(
             "<KeyRelease>",
             lambda _event: self._apply_system_prompt_height(),
@@ -268,13 +296,18 @@ class GemmaChat(
             sys_frame,
             height=self.system_prompt_lines.get(),
             wrap=tk.WORD,
+            undo=True,
+            autoseparators=True,
+            maxundo=200,
             relief=tk.FLAT,
             borderwidth=0,
             padx=10,
             pady=8,
         )
         self.system_prompt.insert("1.0", "You are a helpful assistant.")
+        self.system_prompt.edit_reset()
         self.system_prompt.pack(fill=tk.X)
+        self._bind_system_prompt_editing()
         self._apply_system_prompt_height()
 
         # --- Generation params (collapsible row) ---
@@ -508,6 +541,33 @@ class GemmaChat(
         widget.bind("<ButtonPress-1>", lambda _event, w=widget: self._freeze_selection_updates(w), add="+")
         widget.bind("<B1-Motion>", lambda _event, w=widget: self._freeze_selection_updates(w), add="+")
         widget.bind("<ButtonRelease-1>", lambda _event, w=widget: self._release_selection_updates(w), add="+")
+
+    def _bind_system_prompt_editing(self):
+        self.system_prompt.bind("<Control-a>", lambda _event: self._select_all_text(self.system_prompt))
+        self.system_prompt.bind("<Control-A>", lambda _event: self._select_all_text(self.system_prompt))
+        self.system_prompt.bind("<Control-z>", self._undo_system_prompt)
+        self.system_prompt.bind("<Control-Z>", self._undo_system_prompt)
+        self.system_prompt.bind("<Control-y>", self._redo_system_prompt)
+        self.system_prompt.bind("<Control-Y>", self._redo_system_prompt)
+        self.system_prompt.bind("<Control-Shift-Z>", self._redo_system_prompt)
+
+    def _undo_system_prompt(self, _event=None):
+        try:
+            self.system_prompt.edit_undo()
+            self.system_prompt.edit_modified(True)
+            self.root.after_idle(self._fit_system_prompt_to_content)
+        except tk.TclError:
+            pass
+        return "break"
+
+    def _redo_system_prompt(self, _event=None):
+        try:
+            self.system_prompt.edit_redo()
+            self.system_prompt.edit_modified(True)
+            self.root.after_idle(self._fit_system_prompt_to_content)
+        except tk.TclError:
+            pass
+        return "break"
 
     def _block_readonly_edit(self, event):
         allowed_keys = {

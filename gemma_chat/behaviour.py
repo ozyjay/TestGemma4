@@ -40,12 +40,14 @@ class BehaviourMixin:
             self.system_prompt.configure(height=height)
 
     def _set_system_prompt(self, text: str):
+        self._remember_system_prompt_version(self._get_system_prompt(), "before rewrite", force=True)
         self.system_prompt.delete("1.0", tk.END)
         self.system_prompt.insert("1.0", text)
         self._fit_system_prompt_to_content()
         self.system_prompt.see(tk.END)
+        self.system_prompt.edit_reset()
         self.system_prompt.edit_modified(False)
-        self._save_system_prompt()
+        self._save_system_prompt(remember_previous=False)
 
     def _start_behaviour_rewrite(self, advice: str):
         advice = advice.strip()

@@ -52,6 +52,16 @@ the saved Assistant Behaviour (`system_prompt.md`), chat logs, and diagnostics
 logs. The model weights are not stored in this repo; Hugging Face downloads and
 caches them on the machine.
 
+Assistant Behaviour history is saved beside the current prompt:
+
+```text
+.test.gemma4\system_prompt_history.json
+```
+
+Use the prompt history selector in the desktop app to restore an earlier
+Assistant Behaviour. The Assistant Behaviour editor supports normal undo and
+redo shortcuts while you are editing it.
+
 The desktop app also saves the current conversation in:
 
 ```text

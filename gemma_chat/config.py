@@ -5,6 +5,8 @@ from pathlib import Path
 MODEL_ID = "google/gemma-4-E2B-it"
 APP_FOLDER_NAME = ".test.gemma4"
 SYSTEM_PROMPT_FILE_NAME = "system_prompt.md"
+SYSTEM_PROMPT_HISTORY_FILE_NAME = "system_prompt_history.json"
+SYSTEM_PROMPT_HISTORY_LIMIT = 50
 CONVERSATION_FILE_NAME = "conversation.json"
 SETTINGS_DIR = Path.home() / "AppData" / "Roaming" / "TestGemma4"
 SETTINGS_FILE = SETTINGS_DIR / "settings.json"

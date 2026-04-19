@@ -6,8 +6,14 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
-from .config import APP_FOLDER_NAME, MODEL_ID
-from .storage import conversation_path, read_settings, system_prompt_path, write_settings
+from .config import APP_FOLDER_NAME, MODEL_ID, SYSTEM_PROMPT_HISTORY_LIMIT
+from .storage import (
+    conversation_path,
+    read_settings,
+    system_prompt_history_path,
+    system_prompt_path,
+    write_settings,
+)
 
 
 class PersistenceMixin:
@@ -18,7 +24,8 @@ class PersistenceMixin:
             return
 
         self._load_saved_system_prompt()
-        self._save_system_prompt()
+        self._load_system_prompt_history()
+        self._save_system_prompt(remember_previous=False)
         self._start_new_log()
 
     def _read_settings(self) -> dict:
@@ -51,6 +58,7 @@ class PersistenceMixin:
         self.system_prompt.delete("1.0", tk.END)
         self.system_prompt.insert("1.0", saved_prompt)
         self._fit_system_prompt_to_content()
+        self.system_prompt.edit_reset()
         self.system_prompt.edit_modified(False)
 
     def _on_system_prompt_modified(self, _event=None):
@@ -62,14 +70,23 @@ class PersistenceMixin:
             self.root.after_cancel(self._system_prompt_save_job)
         self._system_prompt_save_job = self.root.after(500, self._save_system_prompt)
 
-    def _save_system_prompt(self):
+    def _save_system_prompt(self, remember_previous: bool = True, history_source: str = "edited"):
         self._system_prompt_save_job = None
         prompt_path = self._system_prompt_path()
         if not prompt_path:
             return
 
+        current_prompt = self._get_system_prompt()
+        if remember_previous and prompt_path.exists():
+            try:
+                previous_prompt = prompt_path.read_text(encoding="utf-8")
+            except OSError:
+                previous_prompt = ""
+            if previous_prompt.strip() and previous_prompt != current_prompt:
+                self._remember_system_prompt_version(previous_prompt, history_source)
+
         try:
-            prompt_path.write_text(self._get_system_prompt(), encoding="utf-8")
+            prompt_path.write_text(current_prompt, encoding="utf-8")
         except OSError as exc:
             self.status_var.set(f"System prompt save failed: {exc}")
 
@@ -78,6 +95,142 @@ class PersistenceMixin:
             return None
 
         return system_prompt_path(self.log_dir)
+
+    def _system_prompt_history_path(self) -> Path | None:
+        if not self.log_dir:
+            return None
+
+        return system_prompt_history_path(self.log_dir)
+
+    def _load_system_prompt_history(self):
+        self._system_prompt_history = []
+        path = self._system_prompt_history_path()
+        if not path or not path.exists():
+            self._refresh_system_prompt_history_menu()
+            return
+
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            self._refresh_system_prompt_history_menu()
+            return
+
+        if not isinstance(loaded, list):
+            self._refresh_system_prompt_history_menu()
+            return
+
+        history: list[dict] = []
+        for item in loaded:
+            if not isinstance(item, dict):
+                continue
+            content = item.get("content")
+            timestamp = item.get("timestamp")
+            source = item.get("source", "edited")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            if not isinstance(timestamp, str):
+                timestamp = ""
+            if not isinstance(source, str):
+                source = "edited"
+            history.append(
+                {
+                    "timestamp": timestamp,
+                    "source": source,
+                    "content": content,
+                }
+            )
+
+        self._system_prompt_history = history[:SYSTEM_PROMPT_HISTORY_LIMIT]
+        self._refresh_system_prompt_history_menu()
+
+    def _write_system_prompt_history(self):
+        path = self._system_prompt_history_path()
+        if not path:
+            return
+
+        try:
+            path.write_text(
+                json.dumps(
+                    self._system_prompt_history[:SYSTEM_PROMPT_HISTORY_LIMIT],
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            self.status_var.set(f"System prompt history save failed: {exc}")
+
+    def _remember_system_prompt_version(self, content: str, source: str = "edited", force: bool = False):
+        content = content.strip()
+        if not content:
+            return
+        if not force and content == self._get_system_prompt():
+            return
+        if any(entry.get("content") == content for entry in self._system_prompt_history):
+            return
+
+        self._system_prompt_history.insert(
+            0,
+            {
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "source": source,
+                "content": content,
+            },
+        )
+        self._system_prompt_history = self._system_prompt_history[:SYSTEM_PROMPT_HISTORY_LIMIT]
+        self._write_system_prompt_history()
+        self._refresh_system_prompt_history_menu()
+
+    def _refresh_system_prompt_history_menu(self):
+        history_combo = getattr(self, "system_prompt_history_combo", None)
+        restore_button = getattr(self, "restore_system_prompt_btn", None)
+        if history_combo is None or restore_button is None:
+            return
+
+        self._system_prompt_history_labels = [
+            self._system_prompt_history_label(entry)
+            for entry in self._system_prompt_history
+        ]
+        history_combo.configure(values=self._system_prompt_history_labels)
+        has_history = bool(self._system_prompt_history_labels)
+        history_combo.configure(state="readonly" if has_history else tk.DISABLED)
+        restore_button.configure(state=tk.NORMAL if has_history else tk.DISABLED)
+        if not has_history:
+            self.system_prompt_history_var.set("No saved prompts")
+        elif self.system_prompt_history_var.get() not in self._system_prompt_history_labels:
+            self.system_prompt_history_var.set("Prompt history")
+
+    def _system_prompt_history_label(self, entry: dict) -> str:
+        timestamp = entry.get("timestamp") or "unknown time"
+        source = entry.get("source") or "edited"
+        first_line = (entry.get("content") or "").strip().splitlines()[0]
+        if len(first_line) > 42:
+            first_line = first_line[:39].rstrip() + "..."
+        return f"{timestamp} - {source} - {first_line}"
+
+    def _restore_selected_system_prompt(self):
+        label = self.system_prompt_history_var.get()
+        try:
+            index = self._system_prompt_history_labels.index(label)
+        except ValueError:
+            self.status_var.set("Choose a saved prompt first.")
+            return
+
+        entry = self._system_prompt_history[index]
+        content = entry.get("content")
+        if not isinstance(content, str):
+            self.status_var.set("Saved prompt could not be restored.")
+            return
+
+        self._remember_system_prompt_version(self._get_system_prompt(), "before restore", force=True)
+        self.system_prompt.delete("1.0", tk.END)
+        self.system_prompt.insert("1.0", content)
+        self._fit_system_prompt_to_content()
+        self.system_prompt.see("1.0")
+        self.system_prompt.edit_reset()
+        self.system_prompt.edit_modified(False)
+        self._save_system_prompt(remember_previous=False)
+        self.status_var.set("Restored saved assistant behaviour.")
 
     def _conversation_path(self) -> Path | None:
         if not self.log_dir:
