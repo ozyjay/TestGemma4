@@ -166,6 +166,19 @@ Useful build options:
 .\scripts\Build.ps1 -SkipInstall  # reuse already installed build deps
 ```
 
+When replacing the app icon, use a clean rebuild so both the embedded executable
+icon and the runtime Tk window icon are refreshed:
+
+```powershell
+.\scripts\Build.ps1 -Clean
+.\scripts\Install-ToPrograms.ps1 -Replace
+```
+
+Windows Explorer and taskbar shortcuts may keep showing the previous icon from
+the shell icon cache. If the rebuilt `dist\Gemma4Chat\Gemma4Chat.exe` has the
+new icon but an installed shortcut still looks old, unpin and repin the app, or
+restart Explorer/sign out and back in.
+
 Install the built app under the current user's local programs folder:
 
 ```powershell
@@ -192,6 +205,12 @@ That installs to:
 
 ```text
 E:\Programs\Gemma4Chat
+```
+
+Or install to an exact target folder:
+
+```powershell
+.\scripts\Install-ToPrograms.ps1 -InstallPath "D:\Tools\Gemma4Chat"
 ```
 
 Replace an existing installed copy:

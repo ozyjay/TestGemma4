@@ -1,0 +1,467 @@
+"""Model loading, generation, timers, and lifecycle mixin."""
+
+import sys
+import threading
+import time
+import traceback
+import tkinter as tk
+from datetime import datetime
+
+import torch
+from huggingface_hub import snapshot_download
+from transformers import AutoModelForCausalLM, AutoProcessor, TextIteratorStreamer
+
+from .config import MODEL_ID
+from .model import _StopOnEvent, _split_gemma_channels
+from .stats import TkProgressBar
+
+
+class RuntimeMixin:
+    def _start_stats_loop(self):
+        self.stats_var.set(self.stats.get())
+        self.root.after(2000, self._start_stats_loop)
+
+    # ── Elapsed time tracker ────────────────────────────────────────────
+
+    def _start_elapsed_timer(self):
+        self._load_start = time.perf_counter()
+        self._tick_elapsed()
+
+    def _tick_elapsed(self):
+        if self._load_start > 0:
+            elapsed = time.perf_counter() - self._load_start
+            self.elapsed_var.set(f"{elapsed:.0f}s")
+            self.root.after(500, self._tick_elapsed)
+
+    def _stop_elapsed_timer(self):
+        self._load_start = 0
+
+    # ── Model loading ───────────────────────────────────────────────────
+
+    def _load_model_async(self):
+        def _load():
+            try:
+                self.root.after(0, self._start_elapsed_timer)
+
+                # Phase 1: download with progress
+                TkProgressBar._tk_progress_var = self.progress_var
+                TkProgressBar._tk_status_var = self.status_var
+                TkProgressBar._tk_root = self.root
+                self.root.after(0, lambda: self.status_var.set("Downloading model..."))
+                local_path = snapshot_download(MODEL_ID, tqdm_class=TkProgressBar)
+
+                # Phase 2: load into GPU
+                self.root.after(0, lambda: self.status_var.set("Loading weights into GPU..."))
+                self.root.after(0, lambda: self.progress_bar.configure(mode="indeterminate"))
+                self.root.after(0, lambda: self.loading_progress.configure(mode="indeterminate"))
+                self.root.after(0, lambda: self.progress_bar.start(15))
+                self.root.after(0, lambda: self.loading_progress.start(15))
+
+                self.processor = AutoProcessor.from_pretrained(local_path)
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    local_path,
+                    dtype=torch.bfloat16,
+                    device_map="auto",
+                )
+
+                def _done():
+                    self.progress_bar.stop()
+                    self.loading_progress.stop()
+                    self.progress_bar.configure(mode="determinate")
+                    self.loading_progress.configure(mode="determinate")
+                    self.progress_var.set(100)
+                    self._stop_elapsed_timer()
+                    self._hide_loading_screen()
+                    if self._pending_send:
+                        self._pending_send = False
+                        self.status_var.set("Model loaded. Sending queued message...")
+                        self._start_generate()
+                    else:
+                        self.status_var.set("Model loaded. Ready to chat.")
+                    self._append_log_entry(
+                        "System",
+                        "Model loaded. Type a message and press Send.",
+                    )
+
+                self.root.after(0, _done)
+
+            except Exception as e:
+                traceback.print_exc(file=sys.stderr)
+
+                def _show_load_error(err=e):
+                    self._stop_elapsed_timer()
+                    self.progress_bar.stop()
+                    self.loading_progress.stop()
+                    self.progress_bar.configure(mode="determinate")
+                    self.loading_progress.configure(mode="determinate")
+                    self.status_var.set(f"Model load failed: {err}")
+                    self._hide_loading_screen()
+                    self._append_chat(f"[Error] Failed to load model: {err}\n\n", "system_msg")
+                    self._append_log_entry("Error", f"Failed to load model: {err}")
+
+                self.root.after(0, _show_load_error)
+
+        threading.Thread(target=_load, daemon=True).start()
+
+    # ── Input handling ──────────────────────────────────────────────────
+
+    def _on_enter(self, event):
+        if not event.state & 0x1:  # Shift not held
+            self._on_send()
+            return "break"
+
+    def _on_update_behaviour(self):
+        instruction = self.user_input.get("1.0", tk.END).strip()
+        command_instruction = self._extract_behaviour_command(instruction)
+        if command_instruction is not None:
+            instruction = command_instruction
+
+        if not instruction:
+            self.status_var.set("Type a behaviour change first.")
+            return
+
+        self.user_input.delete("1.0", tk.END)
+        self._highlight_user_input_commands()
+        self._start_behaviour_rewrite(instruction)
+
+    def _on_send(self):
+        user_text = self.user_input.get("1.0", tk.END).strip()
+
+        if self.updating_behaviour:
+            self.status_var.set("Wait for the behaviour rewrite to finish.")
+            return
+
+        behaviour_instruction = self._extract_behaviour_command(user_text)
+        if behaviour_instruction is not None:
+            if behaviour_instruction:
+                self.user_input.delete("1.0", tk.END)
+                self._highlight_user_input_commands()
+                self._start_behaviour_rewrite(behaviour_instruction)
+            else:
+                self.status_var.set("Usage: /behaviour <instruction>")
+            return
+
+        # If generating and no new text, treat as a stop request
+        if self.generating and not user_text:
+            self._stop_event.set()
+            self.status_var.set("Stopping...")
+            return
+
+        # If generating with new text, steer: stop current, queue follow-up
+        if self.generating and user_text:
+            self._stop_event.set()
+            self.user_input.delete("1.0", tk.END)
+            self._highlight_user_input_commands()
+            # The _finalise callback in _generate will see _pending_steer
+            # and automatically start a new generation.
+            self._pending_steer = user_text
+            self.status_var.set("Steering — stopping current generation...")
+            return
+
+        if not user_text:
+            return
+
+        self.user_input.delete("1.0", tk.END)
+        self._highlight_user_input_commands()
+        self._append_chat("You: ", "user")
+        self._append_chat(f"{user_text}\n\n")
+
+        self.messages.append({"role": "user", "content": user_text})
+        self._save_conversation()
+        self._append_log_entry("User", user_text)
+
+        if self.model is None:
+            # Model still loading — queue message and show feedback
+            self._pending_send = True
+            self.send_btn.configure(state=tk.DISABLED)
+            self.status_var.set("Message queued — waiting for model to finish loading...")
+            return
+
+        self._start_generate()
+
+    def _start_generate(self):
+        self.generating = True
+        self._stop_event.clear()
+        self.send_btn.configure(text="Stop")
+        self.status_var.set("Generating...")
+        self._start_elapsed_timer()
+        self._append_chat("Gemma: ", "assistant")
+        self._append_generation_settings_log(self.think_var.get())
+        self._cancel_stream_render_jobs()
+        self._stream_response_text = ""
+        self._stream_thinking_text = ""
+        self._stream_response_pending_newline = False
+        self._response_stream.reset()
+        self._thinking_stream.reset()
+        if self.think_var.get():
+            self._begin_thinking_block()
+        # Place a mark right after "Gemma: " so we know exactly where
+        # the streamed text starts (for the final markdown re-render).
+        self.chat_display.configure(state=tk.NORMAL)
+        self.chat_display.mark_set("stream_start", "end-1c")
+        self.chat_display.mark_gravity("stream_start", tk.LEFT)
+        self.chat_display.mark_set("response_live_tail_start", "end-1c")
+        self.chat_display.mark_gravity("response_live_tail_start", tk.LEFT)
+        self.chat_display.configure(state=tk.NORMAL)
+        threading.Thread(target=self._generate, daemon=True).start()
+
+    def _generate(self):
+        try:
+            full_messages = self._build_messages()
+            enable_thinking = self.think_var.get()
+
+            text = self.processor.apply_chat_template(
+                full_messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=enable_thinking,
+            )
+            inputs = self.processor(text=text, return_tensors="pt").to(self.model.device)
+
+            streamer = TextIteratorStreamer(
+                self.processor.tokenizer,
+                skip_prompt=True,
+                skip_special_tokens=False,
+            )
+
+            gen_kwargs = dict(
+                **inputs,
+                max_new_tokens=self.max_tokens_var.get(),
+                temperature=self.temp_var.get(),
+                top_p=self.top_p_var.get(),
+                top_k=self.top_k_var.get(),
+                do_sample=True,
+                streamer=streamer,
+                stopping_criteria=[_StopOnEvent(self._stop_event)],
+            )
+
+            # Run generate in its own thread so we can iterate the streamer
+            gen_error: list[Exception] = []
+
+            def _run_generate():
+                try:
+                    self.model.generate(**gen_kwargs)
+                except Exception as exc:
+                    gen_error.append(exc)
+                    streamer.end()  # unblock the iterator
+
+            threading.Thread(target=_run_generate, daemon=True).start()
+
+            # Gemma emits channel-style markers in thinking mode.
+            thought_markers = (
+                "<|channel>thought",
+                "<|channel|>thought",
+                "<thought|>",
+                "<|channel>thinking",
+                "<|channel|>thinking",
+                "<thinking|>",
+                "<|channel>analysis",
+                "<|channel|>analysis",
+                "<analysis|>",
+            )
+            response_markers = (
+                "<channel|>",
+                "<|channel>response",
+                "<|channel|>response",
+                "<response|>",
+                "<|channel>final",
+                "<|channel|>final",
+                "<final|>",
+                "<|channel>answer",
+                "<|channel|>answer",
+                "<answer|>",
+            )
+            turn_markers = ("<turn|>", "<|turn>")
+            special_tokens = tuple(
+                sorted(
+                    (*thought_markers, *response_markers, *turn_markers),
+                    key=len,
+                    reverse=True,
+                )
+            )
+
+            thinking_chunks: list[str] = []
+            response_chunks: list[str] = []
+            raw_chunks: list[str] = []
+            in_thinking = enable_thinking
+            buffer = ""  # accumulates text to detect special tokens
+
+            for chunk in streamer:
+                if self._stop_event.is_set():
+                    break
+
+                raw_chunks.append(chunk)
+                buffer += chunk
+
+                # Process buffer: extract special tokens and route text
+                while buffer:
+                    # Check if buffer starts with any special token
+                    matched_token = None
+                    for st in special_tokens:
+                        if buffer.startswith(st):
+                            matched_token = st
+                            break
+
+                    if matched_token:
+                        buffer = buffer[len(matched_token):]
+                        if matched_token in thought_markers:
+                            in_thinking = True
+                        elif matched_token in response_markers:
+                            in_thinking = False
+                        elif matched_token in turn_markers:
+                            in_thinking = enable_thinking
+                        continue
+
+                    # Check if buffer could be the start of a special token
+                    might_match = any(
+                        st.startswith(buffer) and len(buffer) < len(st)
+                        for st in special_tokens
+                    )
+                    if might_match:
+                        break  # wait for more data
+
+                    # Emit one character
+                    ch = buffer[0]
+                    buffer = buffer[1:]
+                    if in_thinking:
+                        thinking_chunks.append(ch)
+                        self.root.after(0, self._stream_thinking_chunk, ch)
+                    else:
+                        response_chunks.append(ch)
+                        self.root.after(0, self._stream_chunk, ch)
+
+            if gen_error:
+                raise gen_error[0]
+
+            if buffer and not any(st.startswith(buffer) for st in special_tokens):
+                if in_thinking:
+                    thinking_chunks.append(buffer)
+                    self.root.after(0, self._stream_thinking_chunk, buffer)
+                else:
+                    response_chunks.append(buffer)
+                    self.root.after(0, self._stream_chunk, buffer)
+
+            was_stopped = self._stop_event.is_set()
+            split_thinking_text, split_response_text = _split_gemma_channels("".join(raw_chunks))
+            thinking_text = "".join(thinking_chunks).strip() or split_thinking_text
+            response_text = "".join(response_chunks).strip()
+            if not response_text and (not enable_thinking or split_thinking_text):
+                response_text = split_response_text
+
+            if response_text:
+                response_text = response_text.replace("\\n", "\n")
+            if thinking_text:
+                thinking_text = thinking_text.replace("\\n", "\n")
+
+            def _finalise():
+                self._cancel_stream_render_jobs()
+                # Replace the streamed plain text with properly rendered markdown
+                self._replace_streamed_with_markdown(response_text)
+
+                # Re-render thinking panel with markdown if we have thinking content
+                if thinking_text:
+                    self._replace_streamed_thinking_with_markdown(thinking_text)
+                    self._append_log_entry("Thinking", thinking_text)
+                else:
+                    self._discard_active_thinking_block()
+
+                if was_stopped and response_text:
+                    # Save partial response with a marker
+                    logged_response = response_text + " [interrupted]"
+                    self.messages.append({"role": "assistant", "content": logged_response})
+                    self._save_conversation()
+                    self._append_log_entry("Assistant", logged_response)
+                elif response_text:
+                    self.messages.append({"role": "assistant", "content": response_text})
+                    self._save_conversation()
+                    self._append_log_entry("Assistant", response_text)
+
+                self._stop_elapsed_timer()
+                self.generating = False
+                self.send_btn.configure(text="Send")
+
+                # Check if there's a pending steer (follow-up typed during generation)
+                steer_text = self._pending_steer
+                self._pending_steer = None
+                if steer_text:
+                    self._append_chat("You: ", "user")
+                    self._append_chat(f"{steer_text}\n\n")
+                    self.messages.append({"role": "user", "content": steer_text})
+                    self._save_conversation()
+                    self._append_log_entry("User", steer_text)
+                    self._start_generate()
+                elif was_stopped:
+                    self.status_var.set("Generation stopped.")
+                else:
+                    self.status_var.set("Ready.")
+
+            self.root.after(0, _finalise)
+
+        except Exception as e:
+            traceback.print_exc(file=sys.stderr)
+
+            def _show_error(err=e):
+                self._cancel_stream_render_jobs()
+                if self._active_thinking_block and self._stream_thinking_text.strip():
+                    self._replace_streamed_thinking_with_markdown(self._stream_thinking_text)
+                self._append_chat(f"\n[Error] {err}\n\n", "system_msg")
+                self._append_log_entry("Error", str(err))
+                self.status_var.set("Error occurred.")
+                self.send_btn.configure(text="Send")
+                self.generating = False
+
+            self.root.after(0, _show_error)
+
+    def _on_clear(self):
+        self._cancel_stream_render_jobs()
+        self._stream_response_text = ""
+        self._stream_thinking_text = ""
+        self._stream_response_pending_newline = False
+        self._response_stream.reset()
+        self._thinking_stream.reset()
+        self._append_log_entry("System", "Conversation cleared.")
+        self._reset_conversation()
+        self._save_conversation()
+        self.chat_display.configure(state=tk.NORMAL)
+        self.chat_display.delete("1.0", tk.END)
+        self.chat_display.configure(state=tk.NORMAL)
+        self.thinking_display.configure(state=tk.NORMAL)
+        self.thinking_display.delete("1.0", tk.END)
+        self.thinking_display.configure(state=tk.NORMAL)
+        self._has_thinking_history = False
+        self._active_thinking_block = False
+        self._hide_thinking_panel()
+        self._start_new_log()
+        self.status_var.set("Conversation cleared.")
+
+    def _on_close(self):
+        self._cancel_stream_render_jobs()
+        if self._system_prompt_save_job:
+            try:
+                self.root.after_cancel(self._system_prompt_save_job)
+            except tk.TclError:
+                pass
+            self._system_prompt_save_job = None
+        self._save_system_prompt()
+        if self._diagnostics_flush_job:
+            try:
+                self.root.after_cancel(self._diagnostics_flush_job)
+            except tk.TclError:
+                pass
+            self._diagnostics_flush_job = None
+            self._flush_diagnostics()
+        self._capture_diagnostic(
+            f"Diagnostics stopped: {datetime.now().isoformat(timespec='seconds')}\n",
+            "diagnostic_meta",
+        )
+        if self._diagnostics_flush_job:
+            try:
+                self.root.after_cancel(self._diagnostics_flush_job)
+            except tk.TclError:
+                pass
+            self._diagnostics_flush_job = None
+        self._flush_diagnostics()
+        self._restore_standard_streams()
+        self._close_diagnostics_log()
+        self.root.destroy()
+

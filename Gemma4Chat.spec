@@ -21,6 +21,8 @@ def safe_collect_submodules(package):
 
 
 datas = []
+datas += [("assets/app-icon.png", "assets")]
+datas += [("assets/app-icon.ico", "assets")]
 datas += safe_collect_data_files("sv_ttk")
 datas += safe_collect_data_files("transformers")
 datas += safe_collect_data_files("huggingface_hub")
