@@ -3,10 +3,8 @@
 import re
 import threading
 
-from transformers import StoppingCriteria
 
-
-class _StopOnEvent(StoppingCriteria):
+class _StopOnEvent:
     """Tells model.generate() to stop when a threading.Event is set."""
 
     def __init__(self, event: threading.Event):

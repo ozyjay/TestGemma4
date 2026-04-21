@@ -22,6 +22,109 @@ from .markdown import StreamingMarkdownState
 from .streaming import StreamingDisplayMixin
 
 
+class CircularProgressIndicator:
+    """Small status-bar progress indicator with a Progressbar-like interface."""
+
+    def __init__(
+        self,
+        parent: tk.Widget,
+        variable: tk.DoubleVar,
+        maximum: float = 100,
+        size: int = 22,
+    ):
+        self.variable = variable
+        self.maximum = maximum
+        self.size = size
+        self.mode = "determinate"
+        self._running = False
+        self._angle = 90
+        self._job: str | None = None
+        self._background = "#20242d"
+        self._track = "#2b313d"
+        self._accent = "#38bdf8"
+        self.canvas = tk.Canvas(
+            parent,
+            width=size,
+            height=size,
+            highlightthickness=0,
+            borderwidth=0,
+            relief=tk.FLAT,
+        )
+        self.variable.trace_add("write", lambda *_args: self._draw())
+        self._draw()
+
+    def pack(self, *args, **kwargs):
+        self.canvas.pack(*args, **kwargs)
+
+    def configure(self, **kwargs):
+        mode = kwargs.pop("mode", None)
+        if mode is not None:
+            self.mode = mode
+        if kwargs:
+            self.canvas.configure(**kwargs)
+        self._draw()
+
+    def start(self, interval: int = 50):
+        self._running = True
+        self._tick(max(15, int(interval)))
+
+    def stop(self):
+        self._running = False
+        if self._job is not None:
+            try:
+                self.canvas.after_cancel(self._job)
+            except tk.TclError:
+                pass
+            self._job = None
+        self._draw()
+
+    def set_palette(self, background: str, track: str, accent: str):
+        self._background = background
+        self._track = track
+        self._accent = accent
+        self.canvas.configure(bg=background)
+        self._draw()
+
+    def _tick(self, interval: int):
+        if not self._running:
+            return
+        self._angle = (self._angle - 24) % 360
+        self._draw()
+        self._job = self.canvas.after(interval, lambda: self._tick(interval))
+
+    def _draw(self):
+        self.canvas.delete("all")
+        pad = 4
+        bounds = (pad, pad, self.size - pad, self.size - pad)
+        self.canvas.create_oval(bounds, outline=self._track, width=2)
+
+        if self.mode == "indeterminate" and self._running:
+            self.canvas.create_arc(
+                bounds,
+                start=self._angle,
+                extent=105,
+                style=tk.ARC,
+                outline=self._accent,
+                width=3,
+            )
+            return
+
+        try:
+            value = float(self.variable.get())
+        except (tk.TclError, ValueError):
+            value = 0
+        pct = 0 if self.maximum <= 0 else max(0, min(1, value / self.maximum))
+        if pct > 0:
+            self.canvas.create_arc(
+                bounds,
+                start=90,
+                extent=-359.9 * pct,
+                style=tk.ARC,
+                outline=self._accent,
+                width=3,
+            )
+
+
 class GemmaChat(
     PersistenceMixin,
     DiagnosticsMixin,
@@ -98,6 +201,7 @@ class GemmaChat(
             ("/reset", "clear conversation history"),
         ]
         self._slash_popup_visible = False
+        self._generation_sliders: list[ttk.Scale] = []
 
         # Font settings
         self._available_fonts: list[str] = []
@@ -168,11 +272,6 @@ class GemmaChat(
             title_frame,
             text="Gemma 4 Chat",
             style="Title.TLabel",
-        ).pack(anchor=tk.W)
-        ttk.Label(
-            title_frame,
-            text="Local model workspace",
-            style="Subtitle.TLabel",
         ).pack(anchor=tk.W)
 
         toolbar = ttk.Frame(header, style="Header.TFrame")
@@ -383,40 +482,40 @@ class GemmaChat(
         self.max_tokens_var = tk.IntVar(value=2048)
         self._make_generation_slider(
             self.params_frame,
-            label="Temperature",
+            label="Creativity",
             variable=self.temp_var,
             from_=0.1,
             to=2.0,
             resolution=0.1,
-            formatter=lambda value: f"{value:.1f}",
+            formatter=lambda value: f"{value:.1f} - {self._creativity_label(value)}",
         )
         self._make_generation_slider(
             self.params_frame,
-            label="Top-p",
+            label="Variety",
             variable=self.top_p_var,
             from_=0.1,
             to=1.0,
             resolution=0.05,
-            formatter=lambda value: f"{value:.2f}",
+            formatter=lambda value: f"{value:.2f} - {self._variety_label(value)}",
         )
         self._make_generation_slider(
             self.params_frame,
-            label="Top-k",
+            label="Choice pool",
             variable=self.top_k_var,
             from_=1,
             to=200,
             resolution=1,
-            formatter=lambda value: str(int(value)),
+            formatter=lambda value: f"{int(value)} - {self._choice_pool_label(value)}",
             integer=True,
         )
         self._make_generation_slider(
             self.params_frame,
-            label="Max tokens",
+            label="Reply length",
             variable=self.max_tokens_var,
             from_=64,
             to=8192,
             resolution=64,
-            formatter=lambda value: str(int(value)),
+            formatter=lambda value: f"{int(value)} - {self._reply_length_label(value)}",
             integer=True,
             expand=True,
         )
@@ -438,10 +537,13 @@ class GemmaChat(
         ).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         self.progress_var = tk.DoubleVar(value=0)
-        self.progress_bar = ttk.Progressbar(
-            status_frame, variable=self.progress_var, maximum=100, length=200,
+        self.progress_bar = CircularProgressIndicator(
+            status_frame,
+            variable=self.progress_var,
+            maximum=100,
+            size=22,
         )
-        self.progress_bar.pack(side=tk.LEFT, padx=(0, 8))
+        self.progress_bar.pack(side=tk.LEFT, padx=(0, 10))
 
         self.elapsed_var = tk.StringVar(value="")
         ttk.Label(
@@ -777,6 +879,11 @@ class GemmaChat(
             highlightbackground=palette["border"],
             font=(self.font_family.get(), self.font_size.get()),
         )
+        self.progress_bar.set_palette(
+            background=palette["surface_alt"],
+            track=palette["border"],
+            accent=palette["accent"],
+        )
         self._configure_chat_tags()
 
     # ── Fonts ───────────────────────────────────────────────────────────
@@ -908,14 +1015,20 @@ class GemmaChat(
 
         header = ttk.Frame(frame, style="Params.TFrame")
         header.pack(fill=tk.X)
-        ttk.Label(header, text=label, style="Params.TLabel").pack(side=tk.LEFT)
+        ttk.Label(
+            header,
+            text=label,
+            style="Params.TLabel",
+            wraplength=260,
+            justify=tk.LEFT,
+        ).pack(side=tk.LEFT)
 
         value_var = tk.StringVar(value=formatter(float(variable.get())))
         ttk.Label(
             header,
             textvariable=value_var,
             style="ParamValue.TLabel",
-            width=7,
+            width=18,
             anchor=tk.E,
         ).pack(side=tk.RIGHT)
 
@@ -939,6 +1052,50 @@ class GemmaChat(
             command=on_change,
         )
         scale.pack(fill=tk.X, pady=(4, 0))
+        self._generation_sliders.append(scale)
+
+    def _refresh_generation_slider_state(self):
+        state = ["disabled"] if self.generating or self.updating_behaviour else ["!disabled"]
+        for scale in self._generation_sliders:
+            scale.state(state)
+
+    def _creativity_label(self, value: float) -> str:
+        if value < 0.5:
+            return "Precise"
+        if value < 0.9:
+            return "Focused"
+        if value < 1.2:
+            return "Balanced"
+        if value < 1.6:
+            return "Creative"
+        return "Experimental"
+
+    def _variety_label(self, value: float) -> str:
+        if value < 0.55:
+            return "Very steady"
+        if value < 0.85:
+            return "Steady"
+        if value < 1.0:
+            return "Varied"
+        return "Most varied"
+
+    def _choice_pool_label(self, value: float) -> str:
+        if value <= 10:
+            return "Very limited"
+        if value <= 40:
+            return "Limited"
+        if value <= 100:
+            return "Flexible"
+        return "Very flexible"
+
+    def _reply_length_label(self, value: float) -> str:
+        if value <= 512:
+            return "Short"
+        if value <= 1536:
+            return "Medium"
+        if value <= 4096:
+            return "Long"
+        return "Very long"
 
     def _copy_latest_response(self):
         text = self._stream_response_text.strip()

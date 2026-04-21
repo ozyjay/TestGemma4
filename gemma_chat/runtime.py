@@ -186,6 +186,7 @@ class RuntimeMixin:
         self._capture_diagnostic(f"Token count unavailable: {error}\n", "diagnostic_meta")
 
     def _refresh_send_button_state(self):
+        self._refresh_generation_slider_state()
         if self.generating:
             self.send_btn.configure(state=tk.NORMAL, text="Stop")
             return
@@ -255,6 +256,7 @@ class RuntimeMixin:
                     self.progress_var.set(100)
                     self._stop_elapsed_timer()
                     self._hide_loading_screen()
+                    self.progress_var.set(0)
                     self._schedule_token_usage_update()
                     if self._pending_send:
                         self._pending_send = False
@@ -397,6 +399,8 @@ class RuntimeMixin:
         self._stop_event.clear()
         self._refresh_send_button_state()
         self.status_var.set("Generating...")
+        self.progress_bar.configure(mode="indeterminate")
+        self.progress_bar.start(50)
         self._start_elapsed_timer()
         self._append_chat("Gemma: ", "assistant")
         self._append_generation_settings_log(self.think_var.get())
@@ -594,6 +598,9 @@ class RuntimeMixin:
                     self._schedule_token_usage_update()
 
                 self._stop_elapsed_timer()
+                self.progress_bar.stop()
+                self.progress_bar.configure(mode="determinate")
+                self.progress_var.set(0)
                 self.generating = False
                 self._refresh_send_button_state()
 
@@ -626,6 +633,9 @@ class RuntimeMixin:
                 self._append_chat(f"\n[Error] {err}\n\n", "system_msg")
                 self._append_log_entry("Error", str(err))
                 self.status_var.set("Error occurred.")
+                self.progress_bar.stop()
+                self.progress_bar.configure(mode="determinate")
+                self.progress_var.set(0)
                 self.generating = False
                 self._refresh_send_button_state()
 

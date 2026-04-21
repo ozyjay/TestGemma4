@@ -1,11 +1,14 @@
 # TestGemma4
 
-Test Google's **Gemma 4 E2B-it** model locally on a suitable NVIDIA GPU.
+Test Google's **Gemma 4 E2B-it** model locally.
+
+This guide assumes you are using a **Windows 11** computer with an **NVIDIA GPU
+with at least 12 GB VRAM**.
 
 ## Quick Windows setup
 
-Gemma 4 is a local model, so the computer needs a suitable NVIDIA GPU. This app
-targets about **12 GB VRAM** for the intended experience.
+Gemma 4 is a local model, so setup depends on the computer's GPU, driver, Python
+environment, and Hugging Face access.
 
 Before running the app for the first time:
 
@@ -14,18 +17,25 @@ Before running the app for the first time:
 3. Create or use a [Hugging Face](https://huggingface.co/) account.
 4. Open the [Gemma 4 model page](https://huggingface.co/google/gemma-4-E2B-it)
    and accept the model licence.
-5. Run the setup assistant:
+5. Check whether the computer looks suitable:
+
+```powershell
+.\scripts\Setup-Gemma4.ps1 -CheckOnly
+```
+
+The setup assistant checks the GPU, NVIDIA driver, disk space, Python
+environment, PyTorch CUDA support, and Hugging Face login.
+
+If the assistant prints `ACTION NEEDED`, follow the final `Next step` it shows,
+then run the check again.
+
+When the check looks suitable, run the setup:
 
 ```powershell
 .\scripts\Setup-Gemma4.ps1
 ```
 
-The setup assistant checks the GPU, NVIDIA driver, disk space, Python
-environment, PyTorch CUDA support, and Hugging Face login. It creates `.venv`
-and installs the Python dependencies when needed.
-
-If the assistant prints `ACTION NEEDED`, follow the final `Next step` it shows,
-then run the same command again.
+This creates `.venv` and installs the Python dependencies when needed.
 
 After Hugging Face access is ready, you can pre-download the model:
 
@@ -39,15 +49,33 @@ To launch the app after a successful setup:
 .\scripts\Setup-Gemma4.ps1 -Launch
 ```
 
-To only check whether the computer looks suitable, without changing setup:
-
-```powershell
-.\scripts\Setup-Gemma4.ps1 -CheckOnly
-```
-
 The assistant cannot create a Hugging Face account, accept the Gemma 4 licence
 for you, install NVIDIA drivers, or install Python globally. It will tell you
 when one of those manual steps is required.
+
+## Hugging Face model location
+
+The Gemma model files are large and are downloaded by Hugging Face into its
+local cache. Expect the download/cache to need roughly **10-20 GB** for the
+model files, plus extra free space for Python packages and temporary download
+files. By default, the Hugging Face cache is usually under your Windows user
+profile.
+
+To store Hugging Face models on another drive, set `HF_HOME` before downloading
+the model:
+
+```powershell
+[Environment]::SetEnvironmentVariable("HF_HOME", "E:\HuggingFace", "User")
+```
+
+Close and reopen PowerShell after setting it, then run:
+
+```powershell
+.\scripts\Setup-Gemma4.ps1 -PreDownloadModel
+```
+
+Use a folder on a drive with plenty of free space. The app will use the same
+Hugging Face cache location when it starts.
 
 ## Manual developer setup
 
