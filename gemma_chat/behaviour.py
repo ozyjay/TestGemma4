@@ -6,8 +6,6 @@ import threading
 import traceback
 import tkinter as tk
 
-import torch
-
 from .model import _split_gemma_channels
 
 
@@ -48,6 +46,7 @@ class BehaviourMixin:
         self.system_prompt.edit_reset()
         self.system_prompt.edit_modified(False)
         self._save_system_prompt(remember_previous=False)
+        self._schedule_token_usage_update()
 
     def _start_behaviour_rewrite(self, advice: str):
         advice = advice.strip()
@@ -69,7 +68,7 @@ class BehaviourMixin:
 
         self.updating_behaviour = True
         self.behaviour_btn.configure(state=tk.DISABLED)
-        self.send_btn.configure(state=tk.DISABLED)
+        self._refresh_send_button_state()
         self.status_var.set("Rewriting assistant behaviour...")
         self._append_chat("System: ", "system_msg")
         self._append_chat(f"Rewriting assistant behaviour from advice: {advice}\n\n", "system_msg")
@@ -84,6 +83,8 @@ class BehaviourMixin:
         ).start()
 
     def _rewrite_behaviour(self, current_behaviour: str, advice: str):
+        import torch
+
         rewrite_messages = [
             {
                 "role": "system",
@@ -174,7 +175,7 @@ class BehaviourMixin:
         self.status_var.set("Assistant behaviour rewritten for future responses.")
         self.updating_behaviour = False
         self.behaviour_btn.configure(state=tk.NORMAL)
-        self.send_btn.configure(state=tk.NORMAL)
+        self._refresh_send_button_state()
 
     def _fail_behaviour_rewrite(self, error: Exception):
         self._discard_active_thinking_block()
@@ -184,16 +185,16 @@ class BehaviourMixin:
         self.status_var.set("Behaviour rewrite failed.")
         self.updating_behaviour = False
         self.behaviour_btn.configure(state=tk.NORMAL)
-        self.send_btn.configure(state=tk.NORMAL)
+        self._refresh_send_button_state()
 
     def _extract_behaviour_command(self, text: str) -> str | None:
         stripped = text.strip()
         lowered = stripped.lower()
-        for command in ("/behaviour", "/behavior"):
-            if lowered == command:
-                return ""
-            if lowered.startswith(command + " "):
-                return stripped[len(command):].strip()
+        command = "/behaviour"
+        if lowered == command:
+            return ""
+        if lowered.startswith(command + " "):
+            return stripped[len(command):].strip()
         return None
 
     def _highlight_user_input_commands(self):
@@ -201,7 +202,7 @@ class BehaviourMixin:
         self.user_input.tag_remove("slash_command_arg", "1.0", tk.END)
 
         text = self.user_input.get("1.0", "end-1c")
-        match = re.match(r"^(/(?:behaviour|behavior|think|reset))(\s+.*)?$", text, re.IGNORECASE | re.DOTALL)
+        match = re.match(r"^(/(?:behaviour|think|reset))(\s+.*)?$", text, re.IGNORECASE | re.DOTALL)
         if not match:
             return
 
@@ -212,6 +213,94 @@ class BehaviourMixin:
 
     def _on_user_input_changed(self, _event=None):
         self.root.after_idle(self._highlight_user_input_commands)
+        self.root.after_idle(self._update_slash_command_popup)
+
+    def _slash_command_query(self) -> str | None:
+        text = self.user_input.get("1.0", "end-1c")
+        if "\n" in text or not text.startswith("/"):
+            return None
+        if " " in text:
+            return None
+        return text.lower()
+
+    def _update_slash_command_popup(self):
+        query = self._slash_command_query()
+        if query is None:
+            self._hide_slash_command_popup()
+            return
+
+        matches = [
+            item for item in self._slash_commands
+            if item[0].startswith(query)
+        ]
+        if not matches:
+            self._hide_slash_command_popup()
+            return
+
+        self._slash_popup_items = matches
+        self.slash_popup.delete(0, tk.END)
+        for command, description in matches:
+            self.slash_popup.insert(tk.END, f"{command} - {description}")
+        self.slash_popup.selection_clear(0, tk.END)
+        self.slash_popup.selection_set(0)
+        self.slash_popup.activate(0)
+        self.slash_popup.configure(height=min(5, len(matches)))
+
+        if not self._slash_popup_visible:
+            self.slash_popup.place(
+                in_=self.user_input,
+                x=0,
+                y=0,
+                relwidth=1,
+                anchor=tk.SW,
+            )
+            self._slash_popup_visible = True
+
+    def _hide_slash_command_popup(self, _event=None):
+        if self._slash_popup_visible:
+            self.slash_popup.place_forget()
+            self._slash_popup_visible = False
+        return None
+
+    def _selected_slash_command_index(self) -> int:
+        selection = self.slash_popup.curselection()
+        if selection:
+            return int(selection[0])
+        return 0
+
+    def _select_slash_command_index(self, index: int):
+        if not self._slash_popup_items:
+            return
+        index = max(0, min(index, len(self._slash_popup_items) - 1))
+        self.slash_popup.selection_clear(0, tk.END)
+        self.slash_popup.selection_set(index)
+        self.slash_popup.activate(index)
+        self.slash_popup.see(index)
+
+    def _slash_command_down(self, _event=None):
+        if not self._slash_popup_visible:
+            return None
+        self._select_slash_command_index(self._selected_slash_command_index() + 1)
+        return "break"
+
+    def _slash_command_up(self, _event=None):
+        if not self._slash_popup_visible:
+            return None
+        self._select_slash_command_index(self._selected_slash_command_index() - 1)
+        return "break"
+
+    def _complete_selected_slash_command(self, _event=None):
+        if not self._slash_popup_visible or not self._slash_popup_items:
+            return None
+
+        command, _description = self._slash_popup_items[self._selected_slash_command_index()]
+        suffix = " " if command == "/behaviour" else ""
+        self.user_input.delete("1.0", tk.END)
+        self.user_input.insert("1.0", command + suffix)
+        self.user_input.mark_set(tk.INSERT, tk.END)
+        self._hide_slash_command_popup()
+        self._highlight_user_input_commands()
+        return "break"
 
     def _build_messages(self) -> list[dict]:
         self._save_system_prompt()

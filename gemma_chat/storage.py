@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .config import (
     CONVERSATION_FILE_NAME,
+    APP_FOLDER_NAME,
     SETTINGS_DIR,
     SETTINGS_FILE,
     SYSTEM_PROMPT_FILE_NAME,
@@ -27,6 +28,15 @@ def write_settings(settings: dict):
         SETTINGS_FILE.write_text(json.dumps(settings, indent=2), encoding="utf-8")
     except OSError:
         pass
+
+
+def default_profiles_root() -> Path:
+    return Path.home() / APP_FOLDER_NAME / "profiles"
+
+
+def profile_label(profile_dir: Path) -> str:
+    name = profile_dir.name.strip()
+    return name or str(profile_dir)
 
 
 def system_prompt_path(log_dir: Path | None) -> Path | None:

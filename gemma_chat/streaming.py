@@ -119,7 +119,11 @@ class StreamingDisplayMixin:
     def _render_streamed_response_markdown(self):
         self._response_render_job = None
         if self._response_stream.pending_final_text is not None:
-            if self._has_active_selection(self.chat_display):
+            if self._selection_overlaps_range(
+                self.chat_display,
+                self._response_stream.start_mark,
+                self._content_end(),
+            ):
                 self._schedule_streamed_response_markdown()
                 return
             self._replace_stream_range_with_markdown(
@@ -145,7 +149,11 @@ class StreamingDisplayMixin:
     def _render_streamed_thinking_markdown(self):
         self._thinking_render_job = None
         if self._thinking_stream.pending_final_text is not None:
-            if self._has_active_selection(self.thinking_display):
+            if self._selection_overlaps_range(
+                self.thinking_display,
+                self._thinking_stream.start_mark,
+                self._content_end(),
+            ):
                 self._schedule_streamed_thinking_markdown()
                 return
             self._replace_stream_range_with_markdown(
@@ -172,7 +180,11 @@ class StreamingDisplayMixin:
     def _replace_streamed_thinking_with_markdown(self, thinking_text: str):
         self._stream_thinking_text = thinking_text
         self._thinking_stream.text = thinking_text
-        if self._has_active_selection(self.thinking_display):
+        if self._selection_overlaps_range(
+            self.thinking_display,
+            self._thinking_stream.start_mark,
+            self._content_end(),
+        ):
             self._thinking_stream.pending_final_text = thinking_text
             self._thinking_stream.pending_final_newline = False
             self._schedule_streamed_thinking_markdown()
@@ -246,6 +258,7 @@ class StreamingDisplayMixin:
         """Append a response token and refresh only the mutable markdown tail."""
         self._stream_response_text += chunk
         self._response_stream.text = self._stream_response_text
+        self._schedule_live_token_usage_update()
         if self._live_tail_updates_paused(self.chat_display, self._response_stream):
             self._append_to_widget(self.chat_display, chunk)
             return
@@ -262,11 +275,36 @@ class StreamingDisplayMixin:
 
         self._schedule_streamed_thinking_markdown()
 
+    def _flush_pending_response_markdown(self):
+        """Finish a deferred response render before appending another turn."""
+        if self._response_render_job:
+            try:
+                self.root.after_cancel(self._response_render_job)
+            except tk.TclError:
+                pass
+            self._response_render_job = None
+
+        if self._response_stream.pending_final_text is not None:
+            self._replace_stream_range_with_markdown(
+                self.chat_display,
+                self._response_stream,
+                self._response_stream.pending_final_text,
+                self._response_stream.pending_final_newline,
+            )
+            self._stream_response_pending_newline = False
+        elif self._stream_response_pending_newline:
+            self._stream_response_pending_newline = False
+            self._append_chat("\n\n")
+
     def _replace_streamed_with_markdown(self, response_text):
         """Delete the raw streamed text and re-render with markdown formatting."""
         self._stream_response_text = response_text
         self._response_stream.text = response_text
-        if self._has_active_selection(self.chat_display):
+        if self._selection_overlaps_range(
+            self.chat_display,
+            self._response_stream.start_mark,
+            self._content_end(),
+        ):
             self._response_stream.pending_final_text = response_text
             self._response_stream.pending_final_newline = True
             self._schedule_streamed_response_markdown()

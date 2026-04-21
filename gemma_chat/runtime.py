@@ -7,10 +7,6 @@ import traceback
 import tkinter as tk
 from datetime import datetime
 
-import torch
-from huggingface_hub import snapshot_download
-from transformers import AutoModelForCausalLM, AutoProcessor, TextIteratorStreamer
-
 from .config import MODEL_ID
 from .model import _StopOnEvent, _split_gemma_channels
 from .stats import TkProgressBar
@@ -18,8 +14,191 @@ from .stats import TkProgressBar
 
 class RuntimeMixin:
     def _start_stats_loop(self):
-        self.stats_var.set(self.stats.get())
+        self._refresh_stats_text()
         self.root.after(2000, self._start_stats_loop)
+
+    def _refresh_stats_text(self):
+        token_text = self.token_usage_var.get()
+        hardware_text = self.stats.get() if self.stats is not None else "CPU: loading"
+        self.stats_var.set(f"{hardware_text}  |  {token_text}")
+        self._apply_token_usage_style()
+
+    def _apply_token_usage_style(self):
+        style_name = {
+            "warning": "StatsWarning.TLabel",
+            "critical": "StatsCritical.TLabel",
+        }.get(self._token_usage_state, "Stats.TLabel")
+        if getattr(self, "stats_label", None) is not None:
+            self.stats_label.configure(style=style_name)
+
+    def _discover_context_limit(self, fallback: int) -> int:
+        candidates: list[int] = []
+        tokenizer = getattr(self.processor, "tokenizer", None)
+        for obj in (tokenizer, getattr(self.model, "config", None)):
+            if obj is None:
+                continue
+            for attr in (
+                "model_max_length",
+                "max_position_embeddings",
+                "max_sequence_length",
+                "seq_length",
+            ):
+                value = getattr(obj, attr, None)
+                if isinstance(value, int) and 0 < value < 1_000_000:
+                    candidates.append(value)
+
+        config = getattr(self.model, "config", None)
+        for child_name in ("text_config", "language_config"):
+            child = getattr(config, child_name, None) if config is not None else None
+            if child is None:
+                continue
+            for attr in ("max_position_embeddings", "max_sequence_length", "seq_length"):
+                value = getattr(child, attr, None)
+                if isinstance(value, int) and 0 < value < 1_000_000:
+                    candidates.append(value)
+
+        if candidates:
+            return max(candidates)
+
+        return fallback or 8192
+
+    def _format_token_usage(
+        self,
+        prompt_tokens: int,
+        reserved_tokens: int,
+        context_limit: int,
+    ) -> tuple[str, str, bool]:
+        used_tokens = prompt_tokens + reserved_tokens
+        pct = (used_tokens / context_limit) * 100 if context_limit else 0
+        prompt_over_limit = prompt_tokens >= context_limit
+        if prompt_over_limit or pct >= 95:
+            state = "critical"
+        elif pct >= 80:
+            state = "warning"
+        else:
+            state = "normal"
+
+        text = (
+            f"Tokens: {used_tokens:,}/{context_limit:,} ({pct:.0f}%)"
+            f" - input {prompt_tokens:,} + reply {reserved_tokens:,}"
+        )
+        return text, state, prompt_over_limit
+
+    def _schedule_token_usage_update(self):
+        if getattr(self, "_token_update_job", None):
+            try:
+                self.root.after_cancel(self._token_update_job)
+            except tk.TclError:
+                pass
+        self._token_update_job = self.root.after(150, self._update_token_usage_async)
+
+    def _schedule_live_token_usage_update(self):
+        if getattr(self, "_token_update_job", None):
+            return
+
+        self._token_update_job = self.root.after(750, self._update_token_usage_async)
+
+    def _update_token_usage_async(self):
+        self._token_update_job = None
+        if self.processor is None or self.model is None:
+            self.token_usage_var.set("Tokens: loading")
+            self._token_usage_state = "loading"
+            self._token_prompt_over_limit = False
+            self._apply_token_usage_style()
+            return
+
+        self._token_update_revision += 1
+        revision = self._token_update_revision
+        messages = [{"role": "system", "content": self._get_system_prompt()}] + list(self.messages)
+        if self.generating and self._stream_response_text.strip():
+            messages.append({"role": "assistant", "content": self._stream_response_text})
+        enable_thinking = bool(self.think_var.get())
+        try:
+            reserved_tokens = int(self.max_tokens_var.get())
+        except (tk.TclError, ValueError):
+            reserved_tokens = 0
+
+        def _count():
+            try:
+                text = self.processor.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=enable_thinking,
+                )
+                tokenizer = self.processor.tokenizer
+                encoded = tokenizer(text, add_special_tokens=False)
+                prompt_tokens = len(encoded["input_ids"])
+                context_limit = self._discover_context_limit(max(reserved_tokens, 8192))
+                token_text, state, prompt_over_limit = self._format_token_usage(
+                    prompt_tokens,
+                    reserved_tokens,
+                    context_limit,
+                )
+                self.root.after(
+                    0,
+                    lambda: self._finish_token_usage_update(
+                        revision,
+                        prompt_tokens,
+                        reserved_tokens,
+                        context_limit,
+                        token_text,
+                        state,
+                        prompt_over_limit,
+                    ),
+                )
+            except Exception as exc:
+                self.root.after(0, lambda err=exc: self._fail_token_usage_update(revision, err))
+
+        threading.Thread(target=_count, daemon=True).start()
+
+    def _finish_token_usage_update(
+        self,
+        revision: int,
+        prompt_tokens: int,
+        reserved_tokens: int,
+        context_limit: int,
+        token_text: str,
+        state: str,
+        prompt_over_limit: bool,
+    ):
+        if revision != self._token_update_revision:
+            return
+
+        self._token_prompt_tokens = prompt_tokens
+        self._token_reserved_tokens = reserved_tokens
+        self._token_context_limit = context_limit
+        self._token_usage_pct = ((prompt_tokens + reserved_tokens) / context_limit) * 100
+        self._token_usage_state = state
+        self._token_prompt_over_limit = prompt_over_limit
+        self.token_usage_var.set(token_text)
+        self._refresh_stats_text()
+        self._refresh_send_button_state()
+
+    def _fail_token_usage_update(self, revision: int, error: Exception):
+        if revision != self._token_update_revision:
+            return
+
+        self.token_usage_var.set("Tokens: unavailable")
+        self._token_usage_state = "warning"
+        self._token_prompt_over_limit = False
+        self._apply_token_usage_style()
+        self._capture_diagnostic(f"Token count unavailable: {error}\n", "diagnostic_meta")
+
+    def _refresh_send_button_state(self):
+        if self.generating:
+            self.send_btn.configure(state=tk.NORMAL, text="Stop")
+            return
+
+        if self.updating_behaviour or self.model is None or self._pending_send:
+            self.send_btn.configure(state=tk.DISABLED)
+            return
+
+        if self._token_prompt_over_limit:
+            self.send_btn.configure(state=tk.DISABLED)
+            return
+
+        self.send_btn.configure(state=tk.NORMAL, text="Send")
 
     # ── Elapsed time tracker ────────────────────────────────────────────
 
@@ -41,6 +220,10 @@ class RuntimeMixin:
     def _load_model_async(self):
         def _load():
             try:
+                import torch
+                from huggingface_hub import snapshot_download
+                from transformers import AutoModelForCausalLM, AutoProcessor
+
                 self.root.after(0, self._start_elapsed_timer)
 
                 # Phase 1: download with progress
@@ -72,12 +255,14 @@ class RuntimeMixin:
                     self.progress_var.set(100)
                     self._stop_elapsed_timer()
                     self._hide_loading_screen()
+                    self._schedule_token_usage_update()
                     if self._pending_send:
                         self._pending_send = False
                         self.status_var.set("Model loaded. Sending queued message...")
                         self._start_generate()
                     else:
                         self.status_var.set("Model loaded. Ready to chat.")
+                        self._refresh_send_button_state()
                     self._append_log_entry(
                         "System",
                         "Model loaded. Type a message and press Send.",
@@ -107,6 +292,8 @@ class RuntimeMixin:
 
     def _on_enter(self, event):
         if not event.state & 0x1:  # Shift not held
+            if self._slash_popup_visible:
+                return self._complete_selected_slash_command(event)
             self._on_send()
             return "break"
 
@@ -136,9 +323,27 @@ class RuntimeMixin:
             if behaviour_instruction:
                 self.user_input.delete("1.0", tk.END)
                 self._highlight_user_input_commands()
+                self._hide_slash_command_popup()
                 self._start_behaviour_rewrite(behaviour_instruction)
             else:
                 self.status_var.set("Usage: /behaviour <instruction>")
+            return
+
+        command = user_text.lower()
+        if command == "/think":
+            self.think_var.set(not self.think_var.get())
+            self.user_input.delete("1.0", tk.END)
+            self._highlight_user_input_commands()
+            self._hide_slash_command_popup()
+            self._schedule_token_usage_update()
+            self.status_var.set(f"Thinking mode {'on' if self.think_var.get() else 'off'}.")
+            return
+
+        if command == "/reset":
+            self.user_input.delete("1.0", tk.END)
+            self._highlight_user_input_commands()
+            self._hide_slash_command_popup()
+            self._on_clear()
             return
 
         # If generating and no new text, treat as a stop request
@@ -152,6 +357,7 @@ class RuntimeMixin:
             self._stop_event.set()
             self.user_input.delete("1.0", tk.END)
             self._highlight_user_input_commands()
+            self._hide_slash_command_popup()
             # The _finalise callback in _generate will see _pending_steer
             # and automatically start a new generation.
             self._pending_steer = user_text
@@ -161,14 +367,21 @@ class RuntimeMixin:
         if not user_text:
             return
 
+        if self._token_prompt_over_limit:
+            self.status_var.set("Prompt exceeds the model context window.")
+            return
+
         self.user_input.delete("1.0", tk.END)
         self._highlight_user_input_commands()
+        self._hide_slash_command_popup()
+        self._flush_pending_response_markdown()
         self._append_chat("You: ", "user")
         self._append_chat(f"{user_text}\n\n")
 
         self.messages.append({"role": "user", "content": user_text})
         self._save_conversation()
         self._append_log_entry("User", user_text)
+        self._schedule_token_usage_update()
 
         if self.model is None:
             # Model still loading — queue message and show feedback
@@ -182,7 +395,7 @@ class RuntimeMixin:
     def _start_generate(self):
         self.generating = True
         self._stop_event.clear()
-        self.send_btn.configure(text="Stop")
+        self._refresh_send_button_state()
         self.status_var.set("Generating...")
         self._start_elapsed_timer()
         self._append_chat("Gemma: ", "assistant")
@@ -207,6 +420,8 @@ class RuntimeMixin:
 
     def _generate(self):
         try:
+            from transformers import TextIteratorStreamer
+
             full_messages = self._build_messages()
             enable_thinking = self.think_var.get()
 
@@ -371,24 +586,28 @@ class RuntimeMixin:
                     self.messages.append({"role": "assistant", "content": logged_response})
                     self._save_conversation()
                     self._append_log_entry("Assistant", logged_response)
+                    self._schedule_token_usage_update()
                 elif response_text:
                     self.messages.append({"role": "assistant", "content": response_text})
                     self._save_conversation()
                     self._append_log_entry("Assistant", response_text)
+                    self._schedule_token_usage_update()
 
                 self._stop_elapsed_timer()
                 self.generating = False
-                self.send_btn.configure(text="Send")
+                self._refresh_send_button_state()
 
                 # Check if there's a pending steer (follow-up typed during generation)
                 steer_text = self._pending_steer
                 self._pending_steer = None
                 if steer_text:
+                    self._flush_pending_response_markdown()
                     self._append_chat("You: ", "user")
                     self._append_chat(f"{steer_text}\n\n")
                     self.messages.append({"role": "user", "content": steer_text})
                     self._save_conversation()
                     self._append_log_entry("User", steer_text)
+                    self._schedule_token_usage_update()
                     self._start_generate()
                 elif was_stopped:
                     self.status_var.set("Generation stopped.")
@@ -407,8 +626,8 @@ class RuntimeMixin:
                 self._append_chat(f"\n[Error] {err}\n\n", "system_msg")
                 self._append_log_entry("Error", str(err))
                 self.status_var.set("Error occurred.")
-                self.send_btn.configure(text="Send")
                 self.generating = False
+                self._refresh_send_button_state()
 
             self.root.after(0, _show_error)
 
@@ -433,6 +652,7 @@ class RuntimeMixin:
         self._hide_thinking_panel()
         self._start_new_log()
         self.status_var.set("Conversation cleared.")
+        self._schedule_token_usage_update()
 
     def _on_close(self):
         self._cancel_stream_render_jobs()

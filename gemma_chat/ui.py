@@ -44,7 +44,7 @@ class GemmaChat(
         self._pending_send = False
         self._stop_event = threading.Event()
         self._pending_steer: str | None = None
-        self.stats = StatsMonitor()
+        self.stats = None
         self._load_start: float = 0
         self._stream_response_text = ""
         self._stream_thinking_text = ""
@@ -71,15 +71,33 @@ class GemmaChat(
         self._system_prompt_max_lines = 8
         self.system_prompt_lines = tk.IntVar(value=self._system_prompt_min_lines)
         self.system_prompt_history_var = tk.StringVar(value="Prompt history")
+        self.profile_var = tk.StringVar(value="No profiles")
+        self._profile_label_to_dir: dict[str, Path] = {}
         self.diagnostics_log_path: Path | None = None
         self._diagnostics_log_handle = None
         self._diagnostics_visible = False
+        self._behaviour_visible = False
         self._loading_screen_visible = False
         self._diagnostics_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self._diagnostics_flush_job: str | None = None
         self._stdout_original = sys.stdout
         self._stderr_original = sys.stderr
         self._diagnostics_redirected = False
+        self.token_usage_var = tk.StringVar(value="Tokens: loading")
+        self._token_prompt_tokens = 0
+        self._token_reserved_tokens = 0
+        self._token_context_limit: int | None = None
+        self._token_usage_pct = 0.0
+        self._token_usage_state = "loading"
+        self._token_prompt_over_limit = False
+        self._token_update_job: str | None = None
+        self._token_update_revision = 0
+        self._slash_commands = [
+            ("/behaviour", "rewrite Assistant Behaviour from advice"),
+            ("/think", "toggle thinking mode"),
+            ("/reset", "clear conversation history"),
+        ]
+        self._slash_popup_visible = False
 
         # Font settings
         self._available_fonts: list[str] = []
@@ -94,11 +112,19 @@ class GemmaChat(
         self._build_ui()
         self._apply_theme()
         self._apply_fonts()
+        self.system_prompt.bind("<<Modified>>", self._on_system_prompt_modified)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.after(50, self._finish_startup_async)
+
+    def _finish_startup_async(self):
+        self.status_var.set("Preparing workspace...")
+        self.root.after(0, self._finish_startup)
+
+    def _finish_startup(self):
         self._setup_logging()
         self._load_saved_conversation()
         self._setup_diagnostics_capture()
-        self.system_prompt.bind("<<Modified>>", self._on_system_prompt_modified)
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.stats = StatsMonitor()
         self._start_stats_loop()
         self._load_model_async()
 
@@ -216,8 +242,18 @@ class GemmaChat(
         # Thinking toggle
         self.think_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            toolbar, text="Thinking Mode", variable=self.think_var
+            toolbar,
+            text="Thinking Mode",
+            variable=self.think_var,
+            command=self._schedule_token_usage_update,
         ).pack(side=tk.LEFT, padx=(0, 8))
+
+        self.behaviour_toggle_btn = ttk.Button(
+            toolbar,
+            text="Behaviour",
+            command=self._toggle_behaviour_panel,
+        )
+        self.behaviour_toggle_btn.pack(side=tk.LEFT, padx=(0, 8))
 
         self.diagnostics_btn = ttk.Button(
             toolbar, text="Diagnostics", command=self._toggle_diagnostics_panel
@@ -230,9 +266,8 @@ class GemmaChat(
         self.copy_latest_btn.pack(side=tk.LEFT)
 
         # --- Assistant behaviour ---
-        sys_frame = ttk.Frame(self.root, padding=(14, 10), style="Panel.TFrame")
-        sys_frame.pack(fill=tk.X, padx=12, pady=(10, 6))
-        behaviour_header = ttk.Frame(sys_frame, style="Panel.TFrame")
+        self.behaviour_frame = ttk.Frame(self.root, padding=(14, 10), style="Panel.TFrame")
+        behaviour_header = ttk.Frame(self.behaviour_frame, style="Panel.TFrame")
         behaviour_header.pack(fill=tk.X, pady=(0, 6))
         ttk.Label(
             behaviour_header,
@@ -242,6 +277,35 @@ class GemmaChat(
 
         behaviour_tools = ttk.Frame(behaviour_header, style="Panel.TFrame")
         behaviour_tools.pack(side=tk.RIGHT)
+
+        ttk.Label(
+            behaviour_tools,
+            text="Behaviour",
+            style="Toolbar.TLabel",
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        self.profile_combo = ttk.Combobox(
+            behaviour_tools,
+            textvariable=self.profile_var,
+            values=[],
+            width=22,
+            state=tk.DISABLED,
+        )
+        self.profile_combo.pack(side=tk.LEFT, padx=(0, 6))
+        self.profile_combo.bind("<<ComboboxSelected>>", self._on_profile_selected)
+
+        self.new_profile_btn = ttk.Button(
+            behaviour_tools,
+            text="New",
+            command=self._on_new_profile,
+        )
+        self.new_profile_btn.pack(side=tk.LEFT, padx=(0, 6))
+
+        self.add_profile_btn = ttk.Button(
+            behaviour_tools,
+            text="Add Existing",
+            command=self._on_add_existing_profile,
+        )
+        self.add_profile_btn.pack(side=tk.LEFT, padx=(0, 12))
 
         self.system_prompt_history_combo = ttk.Combobox(
             behaviour_tools,
@@ -293,7 +357,7 @@ class GemmaChat(
         )
 
         self.system_prompt = tk.Text(
-            sys_frame,
+            self.behaviour_frame,
             height=self.system_prompt_lines.get(),
             wrap=tk.WORD,
             undo=True,
@@ -311,14 +375,14 @@ class GemmaChat(
         self._apply_system_prompt_height()
 
         # --- Generation params (collapsible row) ---
-        params_frame = ttk.Frame(self.root, padding=(14, 8), style="Params.TFrame")
-        params_frame.pack(fill=tk.X, padx=12, pady=(0, 8))
+        self.params_frame = ttk.Frame(self.root, padding=(14, 8), style="Params.TFrame")
+        self.params_frame.pack(fill=tk.X, padx=12, pady=(10, 8))
         self.temp_var = tk.DoubleVar(value=1.0)
         self.top_p_var = tk.DoubleVar(value=0.95)
         self.top_k_var = tk.IntVar(value=64)
         self.max_tokens_var = tk.IntVar(value=2048)
         self._make_generation_slider(
-            params_frame,
+            self.params_frame,
             label="Temperature",
             variable=self.temp_var,
             from_=0.1,
@@ -327,7 +391,7 @@ class GemmaChat(
             formatter=lambda value: f"{value:.1f}",
         )
         self._make_generation_slider(
-            params_frame,
+            self.params_frame,
             label="Top-p",
             variable=self.top_p_var,
             from_=0.1,
@@ -336,7 +400,7 @@ class GemmaChat(
             formatter=lambda value: f"{value:.2f}",
         )
         self._make_generation_slider(
-            params_frame,
+            self.params_frame,
             label="Top-k",
             variable=self.top_k_var,
             from_=1,
@@ -346,7 +410,7 @@ class GemmaChat(
             integer=True,
         )
         self._make_generation_slider(
-            params_frame,
+            self.params_frame,
             label="Max tokens",
             variable=self.max_tokens_var,
             from_=64,
@@ -355,6 +419,10 @@ class GemmaChat(
             formatter=lambda value: str(int(value)),
             integer=True,
             expand=True,
+        )
+        self.max_tokens_var.trace_add(
+            "write",
+            lambda *_args: self._schedule_token_usage_update(),
         )
 
         # --- Status bar (with progress) — pack BOTTOM first ---
@@ -390,7 +458,7 @@ class GemmaChat(
             textvariable=self.stats_var,
             anchor=tk.W,
             padding=(12, 3),
-            style="Status.TLabel",
+            style="Stats.TLabel",
         )
         self.stats_label.pack(fill=tk.X, side=tk.BOTTOM)
 
@@ -410,8 +478,24 @@ class GemmaChat(
         self.user_input.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8))
         self.user_input.bind("<Return>", self._on_enter)
         self.user_input.bind("<Shift-Return>", lambda e: None)
+        self.user_input.bind("<Escape>", self._hide_slash_command_popup)
+        self.user_input.bind("<Tab>", self._complete_selected_slash_command)
+        self.user_input.bind("<Down>", self._slash_command_down)
+        self.user_input.bind("<Up>", self._slash_command_up)
         self.user_input.bind("<KeyRelease>", self._on_user_input_changed)
         self.user_input.bind("<<Paste>>", self._on_user_input_changed)
+
+        self.slash_popup = tk.Listbox(
+            input_frame,
+            height=3,
+            activestyle="none",
+            exportselection=False,
+            relief=tk.FLAT,
+            borderwidth=0,
+        )
+        self.slash_popup.bind("<ButtonRelease-1>", self._complete_selected_slash_command)
+        self.slash_popup.bind("<Return>", self._complete_selected_slash_command)
+        self._slash_popup_items: list[tuple[str, str]] = []
 
         btn_frame = ttk.Frame(input_frame, style="Input.TFrame")
         btn_frame.pack(side=tk.RIGHT, fill=tk.Y)
@@ -651,6 +735,21 @@ class GemmaChat(
             background=palette["surface_alt"],
             foreground=palette["muted"],
         )
+        style.configure(
+            "Stats.TLabel",
+            background=palette["surface_alt"],
+            foreground=palette["stats_fg"],
+        )
+        style.configure(
+            "StatsWarning.TLabel",
+            background=palette["surface_alt"],
+            foreground="#f59e0b",
+        )
+        style.configure(
+            "StatsCritical.TLabel",
+            background=palette["surface_alt"],
+            foreground="#f87171",
+        )
         style.configure("TPanedwindow", background=palette["window_bg"])
         text_widgets = [
             self.chat_display,
@@ -669,6 +768,15 @@ class GemmaChat(
                 highlightbackground=palette["border"],
                 highlightcolor=palette["accent"],
             )
+        self.slash_popup.configure(
+            bg=palette["surface_alt"],
+            fg=palette["text_fg"],
+            selectbackground=palette["select_bg"],
+            selectforeground=palette["text_fg"],
+            highlightthickness=1,
+            highlightbackground=palette["border"],
+            font=(self.font_family.get(), self.font_size.get()),
+        )
         self._configure_chat_tags()
 
     # ── Fonts ───────────────────────────────────────────────────────────
@@ -759,6 +867,17 @@ class GemmaChat(
         if self._thinking_visible:
             self.chat_pane.remove(self.thinking_frame)
             self._thinking_visible = False
+
+    def _toggle_behaviour_panel(self):
+        if self._behaviour_visible:
+            self.behaviour_frame.pack_forget()
+            self._behaviour_visible = False
+            self.behaviour_toggle_btn.configure(text="Behaviour")
+            return
+
+        self.behaviour_frame.pack(fill=tk.X, padx=12, pady=(10, 6), before=self.params_frame)
+        self._behaviour_visible = True
+        self.behaviour_toggle_btn.configure(text="Hide Behaviour")
 
     def _toggle_diagnostics_panel(self):
         if self._diagnostics_visible:

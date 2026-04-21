@@ -1,15 +1,55 @@
 # TestGemma4
 
-Test Google's **Gemma 4 E2B-it** model locally on an RTX 3060 (12 GB VRAM).
+Test Google's **Gemma 4 E2B-it** model locally on a suitable NVIDIA GPU.
 
-## Prerequisites
+## Quick Windows setup
 
-- Python **3.12** (PyTorch does not support 3.14 yet)
-- NVIDIA GPU with CUDA drivers installed
-- A [Hugging Face](https://huggingface.co/) account — you must accept the
-  [Gemma 4 license](https://huggingface.co/google/gemma-4-E2B-it) before downloading
+Gemma 4 is a local model, so the computer needs a suitable NVIDIA GPU. This app
+targets about **12 GB VRAM** for the intended experience.
 
-## Setup
+Before running the app for the first time:
+
+1. Download or clone this project.
+2. Open PowerShell in the project folder.
+3. Create or use a [Hugging Face](https://huggingface.co/) account.
+4. Open the [Gemma 4 model page](https://huggingface.co/google/gemma-4-E2B-it)
+   and accept the model licence.
+5. Run the setup assistant:
+
+```powershell
+.\scripts\Setup-Gemma4.ps1
+```
+
+The setup assistant checks the GPU, NVIDIA driver, disk space, Python
+environment, PyTorch CUDA support, and Hugging Face login. It creates `.venv`
+and installs the Python dependencies when needed.
+
+If the assistant prints `ACTION NEEDED`, follow the final `Next step` it shows,
+then run the same command again.
+
+After Hugging Face access is ready, you can pre-download the model:
+
+```powershell
+.\scripts\Setup-Gemma4.ps1 -PreDownloadModel
+```
+
+To launch the app after a successful setup:
+
+```powershell
+.\scripts\Setup-Gemma4.ps1 -Launch
+```
+
+To only check whether the computer looks suitable, without changing setup:
+
+```powershell
+.\scripts\Setup-Gemma4.ps1 -CheckOnly
+```
+
+The assistant cannot create a Hugging Face account, accept the Gemma 4 licence
+for you, install NVIDIA drivers, or install Python globally. It will tell you
+when one of those manual steps is required.
+
+## Manual developer setup
 
 ```powershell
 # Create a venv with Python 3.12 (using py launcher)
@@ -23,22 +63,7 @@ pip install -r requirements.txt
 huggingface-cli login
 ```
 
-## Clean clone setup
-
-On a new Windows machine:
-
-```powershell
-git clone <your-repo-url>
-cd TestGemma4
-
-py -3.12 -m venv .venv
-.\.venv\Scripts\activate
-
-pip install -r requirements.txt
-huggingface-cli login
-```
-
-The Hugging Face account must have accepted the Gemma model license before the
+The Hugging Face account must have accepted the Gemma model licence before the
 first model download.
 
 Run from source:
@@ -47,12 +72,20 @@ Run from source:
 python app.py
 ```
 
-On first launch, the app asks where to create `.test.gemma4`. That folder stores
-the saved Assistant Behaviour (`system_prompt.md`), chat logs, and diagnostics
-logs. The model weights are not stored in this repo; Hugging Face downloads and
-caches them on the machine.
+On first launch, the app asks where to create `.test.gemma4`. That folder is the
+first Behaviour Profile. A Behaviour Profile stores its own saved Assistant
+Behaviour (`system_prompt.md`), prompt history, current conversation, chat logs,
+and diagnostics logs. The model weights are not stored in this repo; Hugging
+Face downloads and caches them on the machine.
 
-Assistant Behaviour history is saved beside the current prompt:
+Use the `Behaviour` toolbar button to show or hide the Assistant Behaviour
+panel. Inside that panel, use the `Behaviour` selector to switch between
+profiles. Use `New` to create a new profile folder seeded with the current
+Assistant Behaviour, or `Add Existing` to attach an existing folder. Switching
+profiles saves the current profile and restores the selected profile's prompt
+and conversation.
+
+Assistant Behaviour history is saved beside the current profile's prompt:
 
 ```text
 .test.gemma4\system_prompt_history.json
@@ -62,15 +95,27 @@ Use the prompt history selector in the desktop app to restore an earlier
 Assistant Behaviour. The Assistant Behaviour editor supports normal undo and
 redo shortcuts while you are editing it.
 
-The desktop app also saves the current conversation in:
+The desktop app also saves the current profile's conversation in:
 
 ```text
 .test.gemma4\conversation.json
 ```
 
-When you reopen the app, the previous conversation is restored. Use
-`Clear Conversation` to start fresh. This resets `conversation.json` to an empty
-conversation but does not delete transcript or diagnostics log files.
+When you reopen the app, the active profile's previous conversation is restored.
+Use `Clear Conversation` to start fresh in the current profile. This resets that
+profile's `conversation.json` to an empty conversation but does not delete
+transcript or diagnostics log files.
+
+Settings that remember the active and recent profiles are stored outside the
+profile folders:
+
+```text
+%APPDATA%\TestGemma4\settings.json
+```
+
+Older installs that already used a single `.test.gemma4` folder are migrated by
+treating that existing folder as the first active Behaviour Profile. No files
+need to be moved manually.
 
 If Git reports dubious ownership after cloning or moving the folder, trust the
 clone path for the current Windows user:
@@ -123,14 +168,24 @@ Commands inside the chat session:
 - `/think` — toggle thinking mode on/off
 - `/reset` — clear conversation history
 - `/behaviour <instruction>` — rewrite Assistant Behaviour from advice
-- `/behavior <instruction>` — same as `/behaviour`
-- `quit` — exit
 
 In the desktop app, type a behaviour change in the input box and click
 `Update Behaviour` to ask Gemma to rewrite the saved Assistant Behaviour
 instructions without sending the advice as a normal chat message.
 The rewrite uses thinking mode internally; any thinking output appears in the
 Thinking pane.
+
+The desktop app can keep multiple Behaviour Profiles. Each profile has its own
+Assistant Behaviour, prompt history, restored conversation, transcripts, and
+diagnostics. Use the `Behaviour` toolbar button to open the panel, then switch
+profiles from the selector above the prompt editor. `New` creates a profile
+from the current prompt, and `Add Existing` uses an existing profile folder.
+
+The bottom stats bar also shows token usage after the model has loaded. The
+token count includes the current Assistant Behaviour, restored conversation, and
+the configured `Max tokens` reply budget. The indicator changes colour as usage
+approaches the model context window; sending is disabled only when the prompt
+itself no longer fits.
 
 ### Single-shot generation
 
@@ -276,7 +331,7 @@ installed under your local programs folder or another explicit `-InstallRoot`.
 
 Use the `Diagnostics` toolbar button to show or hide captured stdout/stderr output.
 Diagnostics are captured even while the pane is hidden and are saved beside the
-chat logs:
+current profile's chat logs:
 
 ```text
 .test.gemma4\diagnostics_YYYYMMDD_HHMMSS.log

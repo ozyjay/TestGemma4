@@ -52,7 +52,7 @@ def main():
 
     messages = [{"role": "system", "content": "You are a helpful assistant."}]
 
-    print("Type your message (or 'quit' to exit, '/think' to toggle thinking mode).")
+    print("Type your message ('/think' toggles thinking mode; Ctrl+C exits).")
     print(f"Thinking mode: {'ON' if args.think else 'OFF'}\n")
 
     enable_thinking = args.think
@@ -66,9 +66,6 @@ def main():
 
         if not user_input:
             continue
-        if user_input.lower() == "quit":
-            print("Bye!")
-            break
         if user_input.lower() == "/think":
             enable_thinking = not enable_thinking
             print(f"Thinking mode: {'ON' if enable_thinking else 'OFF'}")

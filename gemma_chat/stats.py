@@ -2,42 +2,45 @@
 
 import tkinter as tk
 
-import psutil
 from tqdm.auto import tqdm
-
-try:
-    import pynvml
-
-    pynvml.nvmlInit()
-    _NVML_AVAILABLE = True
-except Exception:
-    _NVML_AVAILABLE = False
 
 
 class StatsMonitor:
     def __init__(self):
+        import psutil
+
+        self._psutil = psutil
+        self._pynvml = None
         self._gpu_handle = None
-        if _NVML_AVAILABLE:
+        try:
+            import pynvml
+
+            pynvml.nvmlInit()
+            self._pynvml = pynvml
+        except Exception:
+            self._pynvml = None
+
+        if self._pynvml:
             try:
-                self._gpu_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                self._gpu_handle = self._pynvml.nvmlDeviceGetHandleByIndex(0)
             except Exception:
                 pass
         # Prime cpu_percent so the first real call returns meaningful data
-        psutil.cpu_percent(interval=None)
+        self._psutil.cpu_percent(interval=None)
 
     def get(self) -> str:
         parts = []
-        cpu = psutil.cpu_percent(interval=None)
-        mem = psutil.virtual_memory()
+        cpu = self._psutil.cpu_percent(interval=None)
+        mem = self._psutil.virtual_memory()
         parts.append(f"CPU: {cpu:.0f}%")
         parts.append(f"RAM: {mem.used / 1073741824:.1f}/{mem.total / 1073741824:.1f} GB")
 
-        if self._gpu_handle:
+        if self._gpu_handle and self._pynvml:
             try:
-                mi = pynvml.nvmlDeviceGetMemoryInfo(self._gpu_handle)
-                util = pynvml.nvmlDeviceGetUtilizationRates(self._gpu_handle)
-                temp = pynvml.nvmlDeviceGetTemperature(
-                    self._gpu_handle, pynvml.NVML_TEMPERATURE_GPU
+                mi = self._pynvml.nvmlDeviceGetMemoryInfo(self._gpu_handle)
+                util = self._pynvml.nvmlDeviceGetUtilizationRates(self._gpu_handle)
+                temp = self._pynvml.nvmlDeviceGetTemperature(
+                    self._gpu_handle, self._pynvml.NVML_TEMPERATURE_GPU
                 )
                 parts.append(
                     f"GPU: {mi.used / 1073741824:.1f}/{mi.total / 1073741824:.1f} GB"
