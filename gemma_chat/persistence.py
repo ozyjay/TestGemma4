@@ -325,10 +325,29 @@ class PersistenceMixin:
     def _system_prompt_history_label(self, entry: dict) -> str:
         timestamp = entry.get("timestamp") or "unknown time"
         source = entry.get("source") or "edited"
-        first_line = (entry.get("content") or "").strip().splitlines()[0]
-        if len(first_line) > 42:
-            first_line = first_line[:39].rstrip() + "..."
-        return f"{timestamp} - {source} - {first_line}"
+        preview = self._system_prompt_history_preview(entry.get("content") or "")
+        return f"{timestamp} - {source} - {preview}"
+
+    def _system_prompt_history_preview(self, content: str) -> str:
+        lines = [line.strip() for line in content.splitlines() if line.strip()]
+        if not lines:
+            return "(empty)"
+
+        first_line = self._truncate_prompt_history_line(lines[0], 38)
+        if len(lines) == 1:
+            return first_line
+
+        last_line = self._truncate_prompt_history_line(lines[-1], 48)
+        if last_line == first_line:
+            return first_line
+
+        return f"{first_line} ... {last_line}"
+
+    @staticmethod
+    def _truncate_prompt_history_line(text: str, limit: int) -> str:
+        if len(text) <= limit:
+            return text
+        return text[: limit - 3].rstrip() + "..."
 
     def _restore_selected_system_prompt(self):
         label = self.system_prompt_history_var.get()

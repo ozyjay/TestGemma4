@@ -17,6 +17,20 @@ Before running the app for the first time:
 2. Open PowerShell in the project folder.
 3. Check whether the computer looks suitable:
 
+If Windows blocks local PowerShell scripts because of the execution policy, use
+a temporary bypass for the current PowerShell window:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+```
+
+This only affects the current PowerShell process. Alternatively, run a script
+with a one-shot bypass:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Setup-Gemma4.ps1 -CheckOnly
+```
+
 ```powershell
 .\scripts\Setup-Gemma4.ps1 -CheckOnly
 ```
@@ -209,6 +223,70 @@ token count includes the current Assistant Behaviour, restored conversation, and
 the configured `Max tokens` reply budget. The indicator changes colour as usage
 approaches the model context window; sending is disabled only when the prompt
 itself no longer fits.
+
+The token readout looks like this:
+
+```text
+Tokens: 6,900/8,192 (84%) - input 5,876 + reply budget 1,024
+```
+
+The `input` number is everything sent before the model starts replying. The
+reply budget is the reserved output room from `Max tokens`. The token part of
+the stats bar is normal below 80%, yellow/orange at 80% or higher, and red at
+95% or higher. It also turns red if the input alone exceeds the model context
+window. If the overall total is yellow or red but sending is still enabled,
+reduce `Max tokens`, shorten Assistant Behaviour, or clear older conversation
+context.
+
+### Configuring Assistant Behaviour and knowledge
+
+The Assistant Behaviour field is the app's system prompt. It is a good place for
+stable instructions: tone, role, response style, formatting preferences,
+decision rules, and small reference notes that should apply to every reply.
+
+You can use it in a similar way to GPT Builder instructions by keeping two
+sections in the prompt:
+
+```text
+## Instructions
+- How the assistant should behave
+- What it should prioritize
+- How it should format answers
+
+## Knowledge
+- Compact facts, definitions, policies, examples, or project notes
+- Only include material that is useful often enough to send every turn
+```
+
+The important difference is that this app does not currently retrieve snippets
+from separate knowledge files on demand. Everything in Assistant Behaviour is
+sent to the model on every message. Large knowledge packs therefore consume
+context, reduce room for conversation, and can slow generation.
+
+Use the bottom stats bar to tune the prompt. The `input` token count includes
+Assistant Behaviour, restored conversation, the current user message, and chat
+template overhead. The reply budget comes from `Max tokens`. A practical target
+is to keep total usage below about 80% of the model context window for normal
+chat, and treat 95% as the danger zone.
+
+As a starting point:
+
+- Keep core instructions around 500-2,000 tokens.
+- Add compact knowledge only when it is needed across many turns.
+- Keep the combined instructions plus always-on knowledge around 2,000-4,000
+  tokens if the loaded model reports an 8,192 token context window.
+- Lower `Max tokens` when you want more room for prompt or conversation.
+- Use `Clear Conversation` when an old restored conversation is taking context
+  away from a new task.
+
+Behaviour Profiles are useful for different agent setups. For example, create
+one profile for coding, another for writing, and another for a project-specific
+assistant with its own compact knowledge section. Each profile keeps its own
+Assistant Behaviour, history, conversation, transcripts, and diagnostics.
+
+To experiment safely, edit Assistant Behaviour, watch the token stats update,
+then send a short test prompt. If a change makes the assistant worse, use the
+prompt history selector to restore an earlier version.
 
 ### Single-shot generation
 

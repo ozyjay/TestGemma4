@@ -19,9 +19,8 @@ class RuntimeMixin:
         self.root.after(2000, self._start_stats_loop)
 
     def _refresh_stats_text(self):
-        token_text = self.token_usage_var.get()
         hardware_text = self.stats.get() if self.stats is not None else "CPU: loading"
-        self.stats_var.set(f"{hardware_text}  |  {token_text}")
+        self.stats_var.set(hardware_text)
         self._apply_token_usage_style()
 
     def _apply_token_usage_style(self):
@@ -29,8 +28,8 @@ class RuntimeMixin:
             "warning": "StatsWarning.TLabel",
             "critical": "StatsCritical.TLabel",
         }.get(self._token_usage_state, "Stats.TLabel")
-        if getattr(self, "stats_label", None) is not None:
-            self.stats_label.configure(style=style_name)
+        if getattr(self, "token_stats_label", None) is not None:
+            self.token_stats_label.configure(style=style_name)
 
     def _discover_context_limit(self, fallback: int) -> int:
         candidates: list[int] = []
@@ -200,6 +199,9 @@ class RuntimeMixin:
 
     def _refresh_send_button_state(self):
         self._refresh_generation_slider_state()
+        think_check = getattr(self, "think_check", None)
+        if think_check is not None:
+            think_check.configure(state=tk.DISABLED if self.generating else tk.NORMAL)
         if self.generating:
             self.send_btn.configure(state=tk.NORMAL, text="Stop")
             return
@@ -339,6 +341,9 @@ class RuntimeMixin:
 
         command = user_text.lower()
         if command == "/think":
+            if self.generating:
+                self.status_var.set("Stop the current generation before changing thinking mode.")
+                return
             self.think_var.set(not self.think_var.get())
             self.user_input.delete("1.0", tk.END)
             self._highlight_user_input_commands()

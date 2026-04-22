@@ -340,12 +340,13 @@ class GemmaChat(
 
         # Thinking toggle
         self.think_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
+        self.think_check = ttk.Checkbutton(
             toolbar,
             text="Thinking Mode",
             variable=self.think_var,
             command=self._schedule_token_usage_update,
-        ).pack(side=tk.LEFT, padx=(0, 8))
+        )
+        self.think_check.pack(side=tk.LEFT, padx=(0, 8))
 
         self.behaviour_toggle_btn = ttk.Button(
             toolbar,
@@ -410,7 +411,7 @@ class GemmaChat(
             behaviour_tools,
             textvariable=self.system_prompt_history_var,
             values=[],
-            width=32,
+            width=58,
             state=tk.DISABLED,
         )
         self.system_prompt_history_combo.pack(side=tk.LEFT, padx=(0, 6))
@@ -555,14 +556,31 @@ class GemmaChat(
 
         # --- Stats bar — pack BOTTOM second ---
         self.stats_var = tk.StringVar(value="")
-        self.stats_label = ttk.Label(
+        self.stats_bar = ttk.Frame(
             self.root,
+            padding=(12, 3),
+            style="Status.TFrame",
+        )
+        self.stats_bar.pack(fill=tk.X, side=tk.BOTTOM)
+        self.stats_label = ttk.Label(
+            self.stats_bar,
             textvariable=self.stats_var,
             anchor=tk.W,
-            padding=(12, 3),
             style="Stats.TLabel",
         )
-        self.stats_label.pack(fill=tk.X, side=tk.BOTTOM)
+        self.stats_label.pack(side=tk.LEFT)
+        ttk.Label(
+            self.stats_bar,
+            text="  |  ",
+            style="Stats.TLabel",
+        ).pack(side=tk.LEFT)
+        self.token_stats_label = ttk.Label(
+            self.stats_bar,
+            textvariable=self.token_usage_var,
+            anchor=tk.W,
+            style="Stats.TLabel",
+        )
+        self.token_stats_label.pack(side=tk.LEFT)
 
         # --- Input bar — pack BOTTOM third ---
         input_frame = ttk.Frame(self.root, padding=(12, 8, 12, 10), style="Input.TFrame")
