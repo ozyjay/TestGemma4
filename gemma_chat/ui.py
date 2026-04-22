@@ -479,7 +479,7 @@ class GemmaChat(
         self.temp_var = tk.DoubleVar(value=1.0)
         self.top_p_var = tk.DoubleVar(value=0.95)
         self.top_k_var = tk.IntVar(value=64)
-        self.max_tokens_var = tk.IntVar(value=2048)
+        self.max_tokens_var = tk.IntVar(value=1024)
         self._make_generation_slider(
             self.params_frame,
             label="Creativity",

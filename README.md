@@ -2,29 +2,28 @@
 
 Test Google's **Gemma 4 E2B-it** model locally.
 
-This guide assumes you are using a **Windows 11** computer with an **NVIDIA GPU
-with at least 12 GB VRAM**.
+This guide assumes you are using a **Windows 11** computer with an **NVIDIA GPU**.
+The smoothest experience is on **12 GB+ VRAM**. An **8 GB VRAM** card can use the
+project's automatic low-VRAM mode.
 
 ## Quick Windows setup
 
 Gemma 4 is a local model, so setup depends on the computer's GPU, driver, Python
-environment, and Hugging Face access.
+environment, and the ability to download from Hugging Face.
 
 Before running the app for the first time:
 
 1. Download or clone this project.
 2. Open PowerShell in the project folder.
-3. Create or use a [Hugging Face](https://huggingface.co/) account.
-4. Open the [Gemma 4 model page](https://huggingface.co/google/gemma-4-E2B-it)
-   and accept the model licence.
-5. Check whether the computer looks suitable:
+3. Check whether the computer looks suitable:
 
 ```powershell
 .\scripts\Setup-Gemma4.ps1 -CheckOnly
 ```
 
 The setup assistant checks the GPU, NVIDIA driver, disk space, Python
-environment, PyTorch CUDA support, and Hugging Face login.
+environment, PyTorch CUDA support, and whether Hugging Face authentication is
+available. Login is optional for public model downloads.
 
 If the assistant prints `ACTION NEEDED`, follow the final `Next step` it shows,
 then run the check again.
@@ -37,7 +36,7 @@ When the check looks suitable, run the setup:
 
 This creates `.venv` and installs the Python dependencies when needed.
 
-After Hugging Face access is ready, you can pre-download the model:
+You can pre-download the model:
 
 ```powershell
 .\scripts\Setup-Gemma4.ps1 -PreDownloadModel
@@ -49,9 +48,8 @@ To launch the app after a successful setup:
 .\scripts\Setup-Gemma4.ps1 -Launch
 ```
 
-The assistant cannot create a Hugging Face account, accept the Gemma 4 licence
-for you, install NVIDIA drivers, or install Python globally. It will tell you
-when one of those manual steps is required.
+The assistant cannot install NVIDIA drivers or install Python globally. It will
+tell you when one of those manual steps is required.
 
 ## Hugging Face model location
 
@@ -87,12 +85,9 @@ py -3.12 -m venv .venv
 # Install dependencies
 pip install -r requirements.txt
 
-# Log in to Hugging Face (needed once for gated model access)
-huggingface-cli login
+# Optional: log in to Hugging Face if a download asks for authentication
+hf auth login
 ```
-
-The Hugging Face account must have accepted the Gemma model licence before the
-first model download.
 
 Run from source:
 
@@ -225,7 +220,41 @@ python generate.py --max-tokens 512 --system "You are a poet." "Write a haiku ab
 
 ## VRAM usage
 
-The E2B-it model loads in BF16 and uses ~10 GB VRAM, leaving ~2 GB headroom on a 12 GB card.
+The E2B-it model normally loads in BF16/FP16 and can use about 10 GB VRAM, leaving
+roughly 2 GB headroom on a 12 GB card. On GPUs below 12 GB VRAM, the app
+automatically tries 4-bit low-VRAM loading instead.
+
+Low-VRAM mode is slower than the normal 12 GB path, but it gives 8 GB cards a
+usable route. Keep `Reply length` closer to 512-1024 tokens on 8 GB cards,
+especially with Thinking Mode enabled.
+
+GTX 10-series cards such as the GTX 1070 use Pascal compute capability 6.1.
+Recent PyTorch CUDA 12.8 wheels do not support that GPU generation, so the setup
+assistant switches those cards to the pinned CUDA 11.8 package set in
+`requirements-pascal.txt`. If setup reports that the installed PyTorch wheel does
+not support the GPU, run:
+
+```powershell
+.\scripts\Setup-Gemma4.ps1
+```
+
+That reinstalls the compatible package set inside `.venv`.
+
+You can override model loading with the `GEMMA4_LOAD_MODE` environment variable:
+
+```powershell
+$env:GEMMA4_LOAD_MODE = "auto"   # default: 4-bit below 12 GB, normal otherwise
+$env:GEMMA4_LOAD_MODE = "4bit"   # force low-VRAM quantized loading
+$env:GEMMA4_LOAD_MODE = "bf16"   # force normal BF16/FP16 loading
+```
+
+The command-line helpers also accept `--load-mode`:
+
+```powershell
+python chat.py --load-mode 4bit
+python generate.py --load-mode 4bit "Explain quicksort"
+```
+
 Monitor with `nvidia-smi`.
 
 ## Build the desktop executable

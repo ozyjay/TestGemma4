@@ -8,6 +8,7 @@ import tkinter as tk
 from datetime import datetime
 
 from .config import MODEL_ID
+from .model_loading import load_processor_and_model, model_input_device
 from .model import _StopOnEvent, _split_gemma_channels
 from .stats import TkProgressBar
 
@@ -221,9 +222,7 @@ class RuntimeMixin:
     def _load_model_async(self):
         def _load():
             try:
-                import torch
                 from huggingface_hub import snapshot_download
-                from transformers import AutoModelForCausalLM, AutoProcessor
 
                 self.root.after(0, self._start_elapsed_timer)
 
@@ -234,19 +233,14 @@ class RuntimeMixin:
                 self.root.after(0, lambda: self.status_var.set("Downloading model..."))
                 local_path = snapshot_download(MODEL_ID, tqdm_class=TkProgressBar)
 
-                # Phase 2: load into GPU
-                self.root.after(0, lambda: self.status_var.set("Loading weights into GPU..."))
+                # Phase 2: load weights
+                self.root.after(0, lambda: self.status_var.set("Loading model weights..."))
                 self.root.after(0, lambda: self.progress_bar.configure(mode="indeterminate"))
                 self.root.after(0, lambda: self.loading_progress.configure(mode="indeterminate"))
                 self.root.after(0, lambda: self.progress_bar.start(15))
                 self.root.after(0, lambda: self.loading_progress.start(15))
 
-                self.processor = AutoProcessor.from_pretrained(local_path)
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    local_path,
-                    dtype=torch.bfloat16,
-                    device_map="auto",
-                )
+                self.processor, self.model, load_info = load_processor_and_model(local_path)
 
                 def _done():
                     self.progress_bar.stop()
@@ -260,14 +254,14 @@ class RuntimeMixin:
                     self._schedule_token_usage_update()
                     if self._pending_send:
                         self._pending_send = False
-                        self.status_var.set("Model loaded. Sending queued message...")
+                        self.status_var.set(f"Model loaded ({load_info.detail}). Sending queued message...")
                         self._start_generate()
                     else:
-                        self.status_var.set("Model loaded. Ready to chat.")
+                        self.status_var.set(f"Model loaded ({load_info.detail}). Ready to chat.")
                         self._refresh_send_button_state()
                     self._append_log_entry(
                         "System",
-                        "Model loaded. Type a message and press Send.",
+                        f"Model loaded with {load_info.detail}. Type a message and press Send.",
                     )
 
                 self.root.after(0, _done)
@@ -435,7 +429,7 @@ class RuntimeMixin:
                 add_generation_prompt=True,
                 enable_thinking=enable_thinking,
             )
-            inputs = self.processor(text=text, return_tensors="pt").to(self.model.device)
+            inputs = self.processor(text=text, return_tensors="pt").to(model_input_device(self.model))
 
             streamer = TextIteratorStreamer(
                 self.processor.tokenizer,

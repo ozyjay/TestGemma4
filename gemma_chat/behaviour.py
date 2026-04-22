@@ -6,6 +6,7 @@ import threading
 import traceback
 import tkinter as tk
 
+from .model_loading import model_input_device
 from .model import _split_gemma_channels
 
 
@@ -119,7 +120,7 @@ class BehaviourMixin:
                 add_generation_prompt=True,
                 enable_thinking=True,
             )
-            inputs = self.processor(text=prompt, return_tensors="pt").to(self.model.device)
+            inputs = self.processor(text=prompt, return_tensors="pt").to(model_input_device(self.model))
             input_length = inputs["input_ids"].shape[-1]
             with torch.inference_mode():
                 output_ids = self.model.generate(

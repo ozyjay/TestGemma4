@@ -1,8 +1,8 @@
 """Single-shot text generation with Gemma 4 E2B-it."""
 
 import argparse
-import torch
-from transformers import AutoProcessor, AutoModelForCausalLM
+
+from gemma_chat.model_loading import load_processor_and_model, model_input_device
 
 MODEL_ID = "google/gemma-4-E2B-it"
 
@@ -19,15 +19,17 @@ def main():
     parser.add_argument(
         "--system", default="You are a helpful assistant.", help="System prompt"
     )
+    parser.add_argument(
+        "--load-mode",
+        choices=("auto", "bf16", "4bit"),
+        default=None,
+        help="Model loading mode. auto uses 4-bit on GPUs below 12 GB VRAM.",
+    )
     args = parser.parse_args()
 
     print(f"Loading {MODEL_ID} ...")
-    processor = AutoProcessor.from_pretrained(MODEL_ID)
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID,
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
-    )
+    processor, model, load_info = load_processor_and_model(MODEL_ID, args.load_mode)
+    print(f"Model loaded ({load_info.detail}).")
 
     messages = [
         {"role": "system", "content": args.system},
@@ -40,7 +42,7 @@ def main():
         add_generation_prompt=True,
         enable_thinking=args.think,
     )
-    inputs = processor(text=text, return_tensors="pt").to(model.device)
+    inputs = processor(text=text, return_tensors="pt").to(model_input_device(model))
     input_len = inputs["input_ids"].shape[-1]
 
     outputs = model.generate(

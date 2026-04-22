@@ -7,9 +7,10 @@ param(
 $ErrorActionPreference = "Stop"
 
 $ModelId = "google/gemma-4-E2B-it"
-$LicenceUrl = "https://huggingface.co/google/gemma-4-E2B-it"
+$ModelUrl = "https://huggingface.co/google/gemma-4-E2B-it"
 $NvidiaDriverUrl = "https://www.nvidia.com/Download/index.aspx"
-$MinimumVramGb = 12
+$MinimumVramGb = 8
+$RecommendedVramGb = 12
 $RecommendedDiskGb = 40
 
 $script:Checks = @()
@@ -116,7 +117,8 @@ function Invoke-Capture {
         [Parameter(Mandatory = $true)]
         [string]$FilePath,
         [Parameter(Mandatory = $true)]
-        [string[]]$Arguments
+        [string[]]$Arguments,
+        [int]$TimeoutSeconds = 60
     )
 
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
@@ -143,9 +145,18 @@ function Invoke-Capture {
             Output = @($_.Exception.Message)
         }
     }
+    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        try {
+            $process.Kill()
+        } catch {
+        }
+        return [PSCustomObject]@{
+            ExitCode = -1
+            Output = @("Timed out after $TimeoutSeconds seconds")
+        }
+    }
     $stdout = $process.StandardOutput.ReadToEnd()
     $stderr = $process.StandardError.ReadToEnd()
-    $process.WaitForExit()
 
     $output = @()
     if ($stdout) {
@@ -225,10 +236,22 @@ function Test-TorchCuda {
 
     $code = @"
 import torch
-print(torch.__version__)
-print(torch.cuda.is_available())
+print("version=" + torch.__version__)
+print("cuda=" + str(torch.cuda.is_available()))
 if torch.cuda.is_available():
-    print(torch.cuda.get_device_name(0))
+    capability = torch.cuda.get_device_capability(0)
+    arch = "sm_{0}{1}".format(*capability)
+    arch_list = torch.cuda.get_arch_list()
+    print("name=" + torch.cuda.get_device_name(0))
+    print("capability={0}.{1}".format(*capability))
+    print("arch=" + arch)
+    print("arch_list=" + ",".join(arch_list))
+    print("arch_supported=" + str(arch in arch_list))
+    try:
+        value = (torch.ones(1, device="cuda") + 1).cpu().item()
+        print("cuda_op=" + str(value))
+    except Exception as exc:
+        print("cuda_op_error=" + type(exc).__name__ + ": " + str(exc))
 "@
     $result = Invoke-Capture -FilePath $PythonPath -Arguments @("-c", $code)
     if ($result.ExitCode -ne 0) {
@@ -240,11 +263,38 @@ if torch.cuda.is_available():
     }
 
     $lines = @($result.Output | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
-    $cudaAvailable = $lines.Count -ge 2 -and $lines[1] -eq "True"
-    $detail = if ($cudaAvailable -and $lines.Count -ge 3) { $lines[2] } else { "CUDA unavailable" }
+    $values = @{}
+    foreach ($line in $lines) {
+        $separator = $line.IndexOf("=")
+        if ($separator -gt 0) {
+            $values[$line.Substring(0, $separator)] = $line.Substring($separator + 1)
+        }
+    }
+
+    $cudaAvailable = $values["cuda"] -eq "True"
+    $name = $values["name"]
+    $capability = $values["capability"]
+    $arch = $values["arch"]
+    $archSupported = $values["arch_supported"] -eq "True"
+    $cudaOpOk = $values.ContainsKey("cuda_op")
+
+    if (-not $cudaAvailable) {
+        $detail = "CUDA unavailable"
+    } elseif (-not $archSupported) {
+        $detail = "$name compute capability $capability is not supported by installed PyTorch"
+    } elseif (-not $cudaOpOk) {
+        $detail = "$name CUDA test failed"
+    } elseif ($capability) {
+        $detail = "$name (compute capability $capability)"
+    } else {
+        $detail = $name
+    }
+
     return [PSCustomObject]@{
-        Ok = $cudaAvailable
+        Ok = ($cudaAvailable -and $archSupported -and $cudaOpOk)
         Detail = $detail
+        Capability = $capability
+        Arch = $arch
         Output = ($result.Output -join "`n")
     }
 }
@@ -252,7 +302,10 @@ if torch.cuda.is_available():
 function Test-HuggingFaceLogin {
     param([Parameter(Mandatory = $true)][string]$HuggingFaceCliPath)
 
-    $result = Invoke-Capture -FilePath $HuggingFaceCliPath -Arguments @("whoami")
+    $result = Invoke-Capture -FilePath $HuggingFaceCliPath -Arguments @("auth", "whoami") -TimeoutSeconds 15
+    if ($result.ExitCode -ne 0) {
+        $result = Invoke-Capture -FilePath $HuggingFaceCliPath -Arguments @("whoami") -TimeoutSeconds 15
+    }
     if ($result.ExitCode -eq 0) {
         $name = @($result.Output | ForEach-Object { "$_".Trim() } | Where-Object { $_ })[0]
         if ($name) {
@@ -287,11 +340,29 @@ print("Downloaded or found cached model: $ModelId")
     return $LASTEXITCODE
 }
 
+function Add-HuggingFaceCliCheck {
+    param([Parameter(Mandatory = $true)][string]$CliPath)
+
+    if (Test-Path -LiteralPath $CliPath -PathType Leaf) {
+        $hfLogin = Test-HuggingFaceLogin -HuggingFaceCliPath $CliPath
+        if ($hfLogin.Ok) {
+            Add-Check -Name "Hugging Face login" -Detail $hfLogin.Detail -Status "OK"
+        } else {
+            Add-Check -Name "Hugging Face login" -Detail "optional, not logged in" -Status "SKIPPED"
+        }
+    } else {
+        Add-Check -Name "Hugging Face login" -Detail "optional; hf CLI unavailable" -Status "SKIPPED"
+    }
+}
+
 try {
     $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
     $venvPython = Join-Path $repoRoot ".venv\Scripts\python.exe"
-    $venvHfCli = Join-Path $repoRoot ".venv\Scripts\huggingface-cli.exe"
+    $venvHfCli = Join-Path $repoRoot ".venv\Scripts\hf.exe"
+    $legacyVenvHfCli = Join-Path $repoRoot ".venv\Scripts\huggingface-cli.exe"
     $requirementsPath = Join-Path $repoRoot "requirements.txt"
+    $pascalRequirementsPath = Join-Path $repoRoot "requirements-pascal.txt"
+    $gpuComputeCapability = $null
 
     if (-not (Test-IsWindows)) {
         Add-Check -Name "Windows" -Detail "not detected" -Status "NOT RECOMMENDED" -HardBlocker -NextStep "Run this helper on Windows, or use the manual setup path for your platform."
@@ -303,7 +374,7 @@ try {
     if (-not $nvidiaSmi) {
         Add-Check -Name "GPU" -Detail "nvidia-smi not found" -Status "NOT RECOMMENDED" -HardBlocker -NextStep "Install or update the NVIDIA driver, then re-run this script: $NvidiaDriverUrl"
     } else {
-        $gpuResult = Invoke-Capture -FilePath $nvidiaSmi -Arguments @("--query-gpu=name,memory.total", "--format=csv,noheader,nounits")
+        $gpuResult = Invoke-Capture -FilePath $nvidiaSmi -Arguments @("--query-gpu=name,memory.total,compute_cap", "--format=csv,noheader,nounits")
         if ($gpuResult.ExitCode -ne 0) {
             Add-Check -Name "Driver" -Detail "nvidia-smi failed" -Status "NOT RECOMMENDED" -HardBlocker -NextStep "Install or update the NVIDIA driver, then re-run this script: $NvidiaDriverUrl"
         } else {
@@ -313,12 +384,18 @@ try {
                 if (-not $text) { continue }
                 $parts = $text -split ","
                 if ($parts.Count -lt 2) { continue }
-                $memoryMbText = $parts[$parts.Count - 1].Trim()
-                $name = (($parts[0..($parts.Count - 2)] -join ",").Trim())
+                $computeCapText = if ($parts.Count -ge 3) { $parts[$parts.Count - 1].Trim() } else { $null }
+                $memoryIndex = if ($parts.Count -ge 3) { $parts.Count - 2 } else { $parts.Count - 1 }
+                $memoryMbText = $parts[$memoryIndex].Trim()
+                $name = (($parts[0..($memoryIndex - 1)] -join ",").Trim())
                 $memoryMb = 0
                 if ([int]::TryParse($memoryMbText, [ref]$memoryMb)) {
                     if (-not $bestGpu -or $memoryMb -gt $bestGpu.MemoryMb) {
-                        $bestGpu = [PSCustomObject]@{ Name = $name; MemoryMb = $memoryMb }
+                        $bestGpu = [PSCustomObject]@{
+                            Name = $name
+                            MemoryMb = $memoryMb
+                            ComputeCapability = $computeCapText
+                        }
                     }
                 }
             }
@@ -327,8 +404,11 @@ try {
                 Add-Check -Name "GPU" -Detail "could not read NVIDIA GPU details" -Status "NOT RECOMMENDED" -HardBlocker -NextStep "Check that the NVIDIA driver is installed and that nvidia-smi works in PowerShell."
             } else {
                 $vramGb = [math]::Round($bestGpu.MemoryMb / 1024, 1)
+                $gpuComputeCapability = $bestGpu.ComputeCapability
                 if ($vramGb -lt $MinimumVramGb) {
-                    Add-Check -Name "GPU" -Detail ("{0}, {1} GB VRAM" -f $bestGpu.Name, $vramGb) -Status "NOT RECOMMENDED" -HardBlocker -NextStep "Use a machine with an NVIDIA GPU with about 12 GB VRAM for the intended Gemma 4 experience."
+                    Add-Check -Name "GPU" -Detail ("{0}, {1} GB VRAM" -f $bestGpu.Name, $vramGb) -Status "NOT RECOMMENDED" -HardBlocker -NextStep "Use a machine with an NVIDIA GPU with at least 8 GB VRAM, or run a smaller model."
+                } elseif ($vramGb -lt $RecommendedVramGb) {
+                    Add-Check -Name "GPU" -Detail ("{0}, {1} GB VRAM" -f $bestGpu.Name, $vramGb) -Status "LOW VRAM OK"
                 } else {
                     Add-Check -Name "GPU" -Detail ("{0}, {1} GB VRAM" -f $bestGpu.Name, $vramGb) -Status "OK"
                 }
@@ -391,6 +471,18 @@ try {
         Add-Check -Name "Virtual environment" -Detail ".venv created" -Status "OK"
     }
 
+    if ($gpuComputeCapability) {
+        $computeCapabilityValue = 0.0
+        if ([double]::TryParse($gpuComputeCapability, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$computeCapabilityValue)) {
+            if ($computeCapabilityValue -lt 7.5) {
+                $requirementsPath = $pascalRequirementsPath
+                Add-Check -Name "PyTorch package set" -Detail "CUDA 11.8 for compute capability $gpuComputeCapability" -Status "PASCAL"
+            } else {
+                Add-Check -Name "PyTorch package set" -Detail "CUDA 12.8 for compute capability $gpuComputeCapability" -Status "CURRENT"
+            }
+        }
+    }
+
     $torchOk = $false
     if (Test-Path -LiteralPath $venvPython -PathType Leaf) {
         $torchCheck = Test-TorchCuda -PythonPath $venvPython
@@ -398,7 +490,7 @@ try {
             $torchOk = $true
             Add-Check -Name "PyTorch CUDA" -Detail $torchCheck.Detail -Status "OK"
         } elseif ($CheckOnly) {
-            Add-Check -Name "PyTorch CUDA" -Detail $torchCheck.Detail -Status "PENDING" -SetupNeeded -NextStep "Run .\scripts\Setup-Gemma4.ps1 without -CheckOnly to install dependencies and verify CUDA."
+            Add-Check -Name "PyTorch CUDA" -Detail $torchCheck.Detail -Status "ACTION NEEDED" -SetupNeeded -NextStep "Run .\scripts\Setup-Gemma4.ps1 without -CheckOnly to install compatible PyTorch packages."
         } elseif (-not $script:HardBlocker) {
             Install-Requirements -PythonPath $venvPython -RequirementsPath $requirementsPath
             $torchCheck = Test-TorchCuda -PythonPath $venvPython
@@ -406,30 +498,25 @@ try {
                 $torchOk = $true
                 Add-Check -Name "PyTorch CUDA" -Detail $torchCheck.Detail -Status "OK"
             } else {
-                Add-Check -Name "PyTorch CUDA" -Detail $torchCheck.Detail -Status "ACTION NEEDED" -SetupNeeded -NextStep "PyTorch installed, but CUDA is unavailable. Update the NVIDIA driver, then re-run this script."
+                Add-Check -Name "PyTorch CUDA" -Detail $torchCheck.Detail -Status "ACTION NEEDED" -SetupNeeded -NextStep "PyTorch installed, but this GPU is still not usable by the installed CUDA wheel. Re-run setup, or install a PyTorch build that supports this GPU."
             }
         }
     } else {
         Add-Check -Name "PyTorch CUDA" -Detail "not checked yet" -Status "PENDING" -SetupNeeded
     }
 
-    if (Test-Path -LiteralPath $venvHfCli -PathType Leaf) {
-        $hfLogin = Test-HuggingFaceLogin -HuggingFaceCliPath $venvHfCli
-        if ($hfLogin.Ok) {
-            Add-Check -Name "Hugging Face login" -Detail $hfLogin.Detail -Status "OK"
-        } else {
-            Add-Check -Name "Hugging Face login" -Detail "not authorised" -Status "ACTION NEEDED" -SetupNeeded -NextStep "Accept the Gemma 4 licence, then run .\.venv\Scripts\huggingface-cli.exe login"
-        }
-    } else {
-        Add-Check -Name "Hugging Face login" -Detail "huggingface-cli unavailable" -Status "PENDING" -SetupNeeded -NextStep "Run .\scripts\Setup-Gemma4.ps1 without -CheckOnly to install dependencies."
+    if (-not (Test-Path -LiteralPath $venvHfCli -PathType Leaf) -and (Test-Path -LiteralPath $legacyVenvHfCli -PathType Leaf)) {
+        $venvHfCli = $legacyVenvHfCli
     }
+
+    Add-HuggingFaceCliCheck -CliPath $venvHfCli
 
     if ($PreDownloadModel -and -not $script:HardBlocker -and $torchOk) {
         $downloadExitCode = Invoke-ModelDownload -PythonPath $venvPython
         if ($downloadExitCode -eq 0) {
             Add-Check -Name "Model files" -Detail "downloaded or cached" -Status "OK"
         } else {
-            Add-Check -Name "Model files" -Detail "download failed" -Status "ACTION NEEDED" -SetupNeeded -NextStep "Accept the Gemma 4 licence at $LicenceUrl, login with huggingface-cli, then re-run with -PreDownloadModel."
+            Add-Check -Name "Model files" -Detail "download failed" -Status "ACTION NEEDED" -SetupNeeded -NextStep "Check $ModelUrl in a browser. If Hugging Face asks you to sign in, run .\.venv\Scripts\hf.exe auth login, then re-run with -PreDownloadModel."
         }
     } elseif ($PreDownloadModel -and -not $torchOk) {
         Add-Check -Name "Model files" -Detail "not attempted" -Status "PENDING" -SetupNeeded
@@ -449,9 +536,6 @@ try {
     if ($script:SetupNeeded) {
         Write-Host ""
         Write-Host "Result: setup needed"
-        Write-Host ""
-        Write-Host "Gemma 4 requires Hugging Face access. You must personally accept the model licence:"
-        Write-Host "  $LicenceUrl"
         if ($script:NextStep) {
             Write-Host ""
             Write-Host "Next step:"
@@ -462,6 +546,10 @@ try {
 
     Write-Host ""
     Write-Host "Result: ready"
+    Write-Host ""
+    Write-Host "Model loading:"
+    Write-Host "  On GPUs below 12 GB VRAM, the app automatically uses 4-bit low-VRAM mode."
+    Write-Host "  Override with GEMMA4_LOAD_MODE=auto, GEMMA4_LOAD_MODE=4bit, or GEMMA4_LOAD_MODE=bf16."
 
     if ($Launch) {
         Write-Host ""
