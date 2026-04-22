@@ -68,8 +68,10 @@ class RuntimeMixin:
         prompt_tokens: int,
         reserved_tokens: int,
         context_limit: int,
+        live_reply_tokens: int = 0,
     ) -> tuple[str, str, bool]:
-        used_tokens = prompt_tokens + reserved_tokens
+        reply_window_tokens = max(reserved_tokens, live_reply_tokens)
+        used_tokens = prompt_tokens + reply_window_tokens
         pct = (used_tokens / context_limit) * 100 if context_limit else 0
         prompt_over_limit = prompt_tokens >= context_limit
         if prompt_over_limit or pct >= 95:
@@ -79,9 +81,14 @@ class RuntimeMixin:
         else:
             state = "normal"
 
+        if live_reply_tokens:
+            reply_text = f"reply {live_reply_tokens:,}/{reserved_tokens:,}"
+        else:
+            reply_text = f"reply budget {reserved_tokens:,}"
+
         text = (
             f"Tokens: {used_tokens:,}/{context_limit:,} ({pct:.0f}%)"
-            f" - input {prompt_tokens:,} + reply {reserved_tokens:,}"
+            f" - input {prompt_tokens:,} + {reply_text}"
         )
         return text, state, prompt_over_limit
 
@@ -111,8 +118,7 @@ class RuntimeMixin:
         self._token_update_revision += 1
         revision = self._token_update_revision
         messages = [{"role": "system", "content": self._get_system_prompt()}] + list(self.messages)
-        if self.generating and self._stream_response_text.strip():
-            messages.append({"role": "assistant", "content": self._stream_response_text})
+        live_response_text = self._stream_response_text if self.generating else ""
         enable_thinking = bool(self.think_var.get())
         try:
             reserved_tokens = int(self.max_tokens_var.get())
@@ -130,11 +136,17 @@ class RuntimeMixin:
                 tokenizer = self.processor.tokenizer
                 encoded = tokenizer(text, add_special_tokens=False)
                 prompt_tokens = len(encoded["input_ids"])
+                if live_response_text.strip():
+                    live_encoded = tokenizer(live_response_text, add_special_tokens=False)
+                    live_reply_tokens = len(live_encoded["input_ids"])
+                else:
+                    live_reply_tokens = 0
                 context_limit = self._discover_context_limit(max(reserved_tokens, 8192))
                 token_text, state, prompt_over_limit = self._format_token_usage(
                     prompt_tokens,
                     reserved_tokens,
                     context_limit,
+                    live_reply_tokens,
                 )
                 self.root.after(
                     0,
