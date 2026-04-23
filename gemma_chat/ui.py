@@ -202,6 +202,8 @@ class GemmaChat(
         ]
         self._slash_popup_visible = False
         self._generation_sliders: list[ttk.Scale] = []
+        self._generation_controls: list[dict] = []
+        self._suppress_generation_status = False
 
         # Font settings
         self._available_fonts: list[str] = []
@@ -496,14 +498,21 @@ class GemmaChat(
         # --- Generation params (collapsible row) ---
         self.params_frame = ttk.Frame(self.root, padding=(14, 8), style="Params.TFrame")
         self.params_frame.pack(fill=tk.X, padx=12, pady=(10, 8))
-        self.temp_var = tk.DoubleVar(value=1.0)
-        self.top_p_var = tk.DoubleVar(value=0.95)
-        self.top_k_var = tk.IntVar(value=64)
-        self.max_tokens_var = tk.IntVar(value=1024)
+        self.generation_defaults = {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "top_k": 64,
+            "max_tokens": 1024,
+        }
+        self.temp_var = tk.DoubleVar(value=self.generation_defaults["temperature"])
+        self.top_p_var = tk.DoubleVar(value=self.generation_defaults["top_p"])
+        self.top_k_var = tk.IntVar(value=self.generation_defaults["top_k"])
+        self.max_tokens_var = tk.IntVar(value=self.generation_defaults["max_tokens"])
         self._make_generation_slider(
             self.params_frame,
             label="Creativity",
             variable=self.temp_var,
+            default=self.generation_defaults["temperature"],
             from_=0.1,
             to=2.0,
             resolution=0.1,
@@ -513,6 +522,7 @@ class GemmaChat(
             self.params_frame,
             label="Variety",
             variable=self.top_p_var,
+            default=self.generation_defaults["top_p"],
             from_=0.1,
             to=1.0,
             resolution=0.05,
@@ -522,6 +532,7 @@ class GemmaChat(
             self.params_frame,
             label="Choice pool",
             variable=self.top_k_var,
+            default=self.generation_defaults["top_k"],
             from_=1,
             to=200,
             resolution=1,
@@ -532,6 +543,7 @@ class GemmaChat(
             self.params_frame,
             label="Reply length",
             variable=self.max_tokens_var,
+            default=self.generation_defaults["max_tokens"],
             from_=64,
             to=8192,
             resolution=64,
@@ -539,6 +551,12 @@ class GemmaChat(
             integer=True,
             expand=True,
         )
+        self.generation_reset_btn = ttk.Button(
+            self.params_frame,
+            text="Reset",
+            command=self._reset_generation_settings,
+        )
+        self.generation_reset_btn.pack(side=tk.LEFT, padx=(12, 0))
         self.max_tokens_var.trace_add(
             "write",
             lambda *_args: self._schedule_token_usage_update(),
@@ -1056,6 +1074,7 @@ class GemmaChat(
         parent: ttk.Frame,
         label: str,
         variable: tk.Variable,
+        default: float,
         from_: float,
         to: float,
         resolution: float,
@@ -1097,7 +1116,12 @@ class GemmaChat(
             if changed:
                 variable.set(snapped)
             value_var.set(formatter(float(snapped)))
-            if changed and not self.generating and not self.updating_behaviour:
+            if (
+                changed
+                and not self._suppress_generation_status
+                and not self.generating
+                and not self.updating_behaviour
+            ):
                 self.status_var.set(
                     "Generation settings updated. Sampling range and reply length can affect response time."
                 )
@@ -1111,11 +1135,43 @@ class GemmaChat(
         )
         scale.pack(fill=tk.X, pady=(4, 0))
         self._generation_sliders.append(scale)
+        self._generation_controls.append(
+            {
+                "variable": variable,
+                "default": default,
+                "formatter": formatter,
+                "value_var": value_var,
+                "integer": integer,
+            }
+        )
+
+    def _reset_generation_settings(self):
+        if self.generating or self.updating_behaviour:
+            return
+
+        self._suppress_generation_status = True
+        try:
+            for control in self._generation_controls:
+                value = control["default"]
+                if control["integer"]:
+                    value = int(value)
+                control["variable"].set(value)
+                control["value_var"].set(control["formatter"](float(value)))
+        finally:
+            self._suppress_generation_status = False
+
+        self._schedule_token_usage_update()
+        self.status_var.set("Generation settings reset to defaults.")
 
     def _refresh_generation_slider_state(self):
         state = ["disabled"] if self.generating or self.updating_behaviour else ["!disabled"]
         for scale in self._generation_sliders:
             scale.state(state)
+        reset_btn = getattr(self, "generation_reset_btn", None)
+        if reset_btn is not None:
+            reset_btn.configure(
+                state=tk.DISABLED if self.generating or self.updating_behaviour else tk.NORMAL
+            )
 
     def _creativity_label(self, value: float) -> str:
         if value < 0.5:
