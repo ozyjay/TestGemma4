@@ -75,7 +75,11 @@ class BehaviourMixin:
         self._append_chat(f"Rewriting assistant behaviour from advice: {advice}\n\n", "system_msg")
         self._append_log_entry("Behaviour Rewrite Advice", advice)
         self._stream_thinking_text = ""
-        self._begin_thinking_block()
+        if self.think_var.get():
+            self._begin_thinking_block()
+        else:
+            self._discard_active_thinking_block()
+            self._hide_thinking_panel()
         current_behaviour = self._get_system_prompt()
         threading.Thread(
             target=self._rewrite_behaviour,
@@ -160,12 +164,13 @@ class BehaviourMixin:
         return cleaned
 
     def _finish_behaviour_rewrite(self, advice: str, rewritten: str, thinking_text: str | None):
-        if thinking_text:
+        if thinking_text and self.think_var.get():
             self._stream_thinking_text = thinking_text
             self._replace_streamed_thinking_with_markdown(thinking_text)
             self._append_log_entry("Thinking", thinking_text)
         else:
             self._discard_active_thinking_block()
+            self._hide_thinking_panel()
         self._set_system_prompt(rewritten)
         self._append_chat("System: ", "system_msg")
         self._append_chat(

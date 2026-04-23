@@ -299,6 +299,25 @@ class GemmaChat(
             "Anonymous Pro", "Input Mono",
             "Iosevka", "Noto Sans Mono",
             "PT Mono", "Space Mono",
+            "0xProto", "Agave", "Andale Mono",
+            "Aptos Mono", "B612 Mono",
+            "Berkeley Mono", "Bitstream Vera Sans Mono",
+            "CommitMono", "Comic Code",
+            "Cousine", "Dank Mono",
+            "DM Mono", "Envy Code R",
+            "Fragment Mono", "Geist Mono",
+            "Go Mono", "Hasklig",
+            "Intel One Mono", "JuliaMono",
+            "Lekton", "Liberation Mono",
+            "Maple Mono", "Martian Mono",
+            "MesloLGS NF", "Monaspace Argon",
+            "Monaspace Krypton", "Monaspace Neon",
+            "Monaspace Radon", "Monaspace Xenon",
+            "Operator Mono", "Overpass Mono",
+            "PragmataPro", "ProFont",
+            "Recursive Mono", "Red Hat Mono",
+            "Sometype Mono", "Terminus",
+            "Ubuntu Sans Mono", "Zed Mono",
         ]
         available = sorted(
             [f for f in coding_fonts if f in all_system], key=str.lower
@@ -344,7 +363,7 @@ class GemmaChat(
             toolbar,
             text="Thinking Mode",
             variable=self.think_var,
-            command=self._schedule_token_usage_update,
+            command=self._on_thinking_mode_changed,
         )
         self.think_check.pack(side=tk.LEFT, padx=(0, 8))
 
@@ -993,6 +1012,22 @@ class GemmaChat(
             self.chat_pane.remove(self.thinking_frame)
             self._thinking_visible = False
 
+    def _on_thinking_mode_changed(self):
+        self._schedule_token_usage_update()
+        if self.think_var.get():
+            self.status_var.set("Thinking mode on.")
+            return
+
+        if self._thinking_render_job:
+            try:
+                self.root.after_cancel(self._thinking_render_job)
+            except tk.TclError:
+                pass
+            self._thinking_render_job = None
+        self._active_thinking_block = False
+        self._hide_thinking_panel()
+        self.status_var.set("Thinking mode off.")
+
     def _toggle_behaviour_panel(self):
         if self._behaviour_visible:
             self.behaviour_frame.pack_forget()
@@ -1058,9 +1093,14 @@ class GemmaChat(
                 snapped = int(round(snapped))
             else:
                 snapped = round(snapped, 4)
-            if variable.get() != snapped:
+            changed = variable.get() != snapped
+            if changed:
                 variable.set(snapped)
             value_var.set(formatter(float(snapped)))
+            if changed and not self.generating and not self.updating_behaviour:
+                self.status_var.set(
+                    "Generation settings updated. Sampling range and reply length can affect response time."
+                )
 
         scale = ttk.Scale(
             frame,

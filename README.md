@@ -238,6 +238,12 @@ window. If the overall total is yellow or red but sending is still enabled,
 reduce `Max tokens`, shorten Assistant Behaviour, or clear older conversation
 context.
 
+The generation sliders can also affect response time. `Reply length` has the
+most direct effect because it sets the maximum number of new tokens, but
+`Creativity`, `Variety`, and `Choice pool` change sampling behaviour and can
+make responses faster or slower depending on the prompt, GPU, and generated
+text.
+
 ### Configuring Assistant Behaviour and knowledge
 
 The Assistant Behaviour field is the app's system prompt. It is a good place for

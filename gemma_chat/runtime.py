@@ -201,7 +201,9 @@ class RuntimeMixin:
         self._refresh_generation_slider_state()
         think_check = getattr(self, "think_check", None)
         if think_check is not None:
-            think_check.configure(state=tk.DISABLED if self.generating else tk.NORMAL)
+            think_check.configure(
+                state=tk.DISABLED if self.generating or self.updating_behaviour else tk.NORMAL
+            )
         if self.generating:
             self.send_btn.configure(state=tk.NORMAL, text="Stop")
             return
@@ -348,8 +350,7 @@ class RuntimeMixin:
             self.user_input.delete("1.0", tk.END)
             self._highlight_user_input_commands()
             self._hide_slash_command_popup()
-            self._schedule_token_usage_update()
-            self.status_var.set(f"Thinking mode {'on' if self.think_var.get() else 'off'}.")
+            self._on_thinking_mode_changed()
             return
 
         if command == "/reset":
@@ -480,25 +481,37 @@ class RuntimeMixin:
             # Gemma emits channel-style markers in thinking mode.
             thought_markers = (
                 "<|channel>thought",
+                "<|channel> thought",
                 "<|channel|>thought",
+                "<|channel|> thought",
                 "<thought|>",
                 "<|channel>thinking",
+                "<|channel> thinking",
                 "<|channel|>thinking",
+                "<|channel|> thinking",
                 "<thinking|>",
                 "<|channel>analysis",
+                "<|channel> analysis",
                 "<|channel|>analysis",
+                "<|channel|> analysis",
                 "<analysis|>",
             )
             response_markers = (
                 "<channel|>",
                 "<|channel>response",
+                "<|channel> response",
                 "<|channel|>response",
+                "<|channel|> response",
                 "<response|>",
                 "<|channel>final",
+                "<|channel> final",
                 "<|channel|>final",
+                "<|channel|> final",
                 "<final|>",
                 "<|channel>answer",
+                "<|channel> answer",
                 "<|channel|>answer",
+                "<|channel|> answer",
                 "<answer|>",
             )
             turn_markers = ("<turn|>", "<|turn>")
@@ -513,7 +526,10 @@ class RuntimeMixin:
             thinking_chunks: list[str] = []
             response_chunks: list[str] = []
             raw_chunks: list[str] = []
-            in_thinking = enable_thinking
+            # Some Gemma responses omit channel markers even when thinking is
+            # enabled. Treat unmarked output as the final response; switch to
+            # thinking only after an explicit thought/analysis marker.
+            in_thinking = False
             buffer = ""  # accumulates text to detect special tokens
 
             for chunk in streamer:
@@ -539,7 +555,7 @@ class RuntimeMixin:
                         elif matched_token in response_markers:
                             in_thinking = False
                         elif matched_token in turn_markers:
-                            in_thinking = enable_thinking
+                            in_thinking = False
                         continue
 
                     # Check if buffer could be the start of a special token
